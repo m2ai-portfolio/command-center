@@ -7,8 +7,32 @@ import {
   addMissionLog,
   listAgents,
   updateAgentStatus,
+  logOutcome,
 } from './db.js';
 import type { Mission, MissionPlan, AgentCard } from '../shared/types.js';
+import type { A2ATaskRequest, A2ATaskStatus } from '../shared/a2a.js';
+
+// ── A2A Agent Registry ───────────────────────────────────────────────
+// Maps agent IDs to their A2A endpoint URLs
+
+const a2aEndpoints = new Map<string, string>();
+
+export function registerA2AAgent(agentId: string, endpoint: string): void {
+  a2aEndpoints.set(agentId, endpoint);
+}
+
+/** Try to discover an agent's A2A card. Returns true if successful. */
+export async function discoverAgent(endpoint: string): Promise<boolean> {
+  try {
+    const res = await fetch(`${endpoint}/.well-known/agent.json`);
+    if (!res.ok) return false;
+    const card = await res.json();
+    a2aEndpoints.set(card.id, endpoint);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 // ── Intent Classification ────────────────────────────────────────────
 
@@ -19,14 +43,9 @@ interface ClassificationResult {
   reasoning: string;
 }
 
-/**
- * Classify intent from a mission goal. For MVP, uses keyword matching.
- * Phase 3 will add LLM-powered classification via Gemini.
- */
 export function classifyIntent(goal: string): ClassificationResult {
   const lower = goal.toLowerCase();
 
-  // Keyword-based classification (MVP — replace with LLM in Phase 3)
   const codingKeywords = /\b(build|code|implement|fix|refactor|debug|create.*app|write.*function|add.*feature|test|deploy)\b/;
   const researchKeywords = /\b(research|find|search|look up|investigate|analyze|compare|what is|how does|summarize)\b/;
   const contentKeywords = /\b(write|draft|blog|post|email|article|documentation|content|social media|copy)\b/;
@@ -42,7 +61,6 @@ export function classifyIntent(goal: string): ClassificationResult {
     ? 'complex'
     : lower.length > 80 ? 'moderate' : 'simple';
 
-  // Match to available agents
   const agents = listAgents() as AgentCard[];
   const matched = agents.find(a =>
     a.skills.some((s: string) => s.toLowerCase() === task_type) && a.status === 'available'
@@ -100,15 +118,24 @@ export async function approveMission(missionId: string): Promise<void> {
   addMissionLog(missionId, 'info', 'Mission approved — executing');
 
   const agentId = (mission.agent_id as string) ?? 'claude-code';
-
-  // Mark agent busy
   updateAgentStatus(agentId, 'busy', missionId);
 
   const startTime = Date.now();
 
   try {
     addMissionLog(missionId, 'progress', `Dispatching to agent: ${agentId}`);
-    const result = await executeViaClaudeCode(mission.goal as string, missionId);
+
+    // Try A2A dispatch first, fall back to direct Claude Code
+    const a2aEndpoint = a2aEndpoints.get(agentId);
+    let result: string;
+
+    if (a2aEndpoint) {
+      addMissionLog(missionId, 'info', `Using A2A protocol → ${a2aEndpoint}`);
+      result = await executeViaA2A(a2aEndpoint, missionId, mission.goal as string);
+    } else {
+      addMissionLog(missionId, 'info', 'No A2A endpoint — using direct Claude Code');
+      result = await executeViaClaudeCode(mission.goal as string, missionId);
+    }
 
     const durationMs = Date.now() - startTime;
     updateMission(missionId, {
@@ -118,6 +145,11 @@ export async function approveMission(missionId: string): Promise<void> {
     });
     addMissionLog(missionId, 'result', result);
     addMissionLog(missionId, 'info', `Mission completed in ${Math.round(durationMs / 1000)}s`);
+
+    // Log outcome for routing quality tracking
+    const planReasoning = mission.plan?.reasoning ?? '';
+    const taskType = planReasoning.match(/Classified as (\w+)/)?.[1] ?? 'unknown';
+    logOutcome(missionId, taskType, agentId, planReasoning, 'completed', durationMs);
   } catch (err) {
     const durationMs = Date.now() - startTime;
     const errMsg = err instanceof Error ? err.message : String(err);
@@ -127,6 +159,10 @@ export async function approveMission(missionId: string): Promise<void> {
       duration_ms: durationMs,
     });
     addMissionLog(missionId, 'error', `Mission failed: ${errMsg}`);
+
+    const planReasoning = mission.plan?.reasoning ?? '';
+    const taskType = planReasoning.match(/Classified as (\w+)/)?.[1] ?? 'unknown';
+    logOutcome(missionId, taskType, agentId, planReasoning, 'failed', durationMs);
   } finally {
     updateAgentStatus(agentId, 'available', null);
   }
@@ -137,16 +173,67 @@ export function cancelMission(missionId: string): void {
   addMissionLog(missionId, 'info', 'Mission cancelled');
 }
 
-// ── Agent Dispatch (MVP: Claude Code subprocess) ─────────────────────
+// ── A2A Dispatch ─────────────────────────────────────────────────────
+
+async function executeViaA2A(endpoint: string, missionId: string, goal: string): Promise<string> {
+  const taskId = uuidv4();
+
+  // Submit task
+  const taskReq: A2ATaskRequest = {
+    id: taskId,
+    goal,
+    sender: { id: 'data-orchestrator', name: 'Data' },
+    timeout_ms: 600_000,
+  };
+
+  const submitRes = await fetch(`${endpoint}/task`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(taskReq),
+  });
+
+  if (!submitRes.ok) {
+    throw new Error(`A2A task submission failed: ${submitRes.status} ${await submitRes.text()}`);
+  }
+
+  addMissionLog(missionId, 'progress', `A2A task ${taskId.slice(0, 8)} submitted, polling...`);
+
+  // Poll for completion
+  const maxWait = 660_000; // 11 min (give agent 10 min + buffer)
+  const pollInterval = 3_000;
+  const startPoll = Date.now();
+
+  while (Date.now() - startPoll < maxWait) {
+    await new Promise(resolve => setTimeout(resolve, pollInterval));
+
+    const statusRes = await fetch(`${endpoint}/task/${taskId}`);
+    if (!statusRes.ok) continue;
+
+    const status = await statusRes.json() as A2ATaskStatus;
+
+    if (status.state === 'completed') {
+      return status.result ?? '(no output)';
+    }
+
+    if (status.state === 'failed') {
+      throw new Error(`Agent failed: ${status.error ?? 'unknown error'}`);
+    }
+
+    // Log progress if there's a new message
+    if (status.progress) {
+      addMissionLog(missionId, 'progress', `Agent: ${status.progress}`);
+    }
+  }
+
+  throw new Error('A2A task timed out waiting for agent response');
+}
+
+// ── Direct Claude Code Dispatch (fallback) ───────────────────────────
 
 function executeViaClaudeCode(prompt: string, missionId: string): Promise<string> {
   return new Promise((resolve, reject) => {
-    const args = [
-      '--print', prompt,
-      '--output-format', 'text',
-    ];
+    const args = ['--print', prompt, '--output-format', 'text'];
 
-    // Build env without ANTHROPIC_API_KEY (use Max OAuth)
     const env = { ...process.env };
     delete env.ANTHROPIC_API_KEY;
 
@@ -155,26 +242,18 @@ function executeViaClaudeCode(prompt: string, missionId: string): Promise<string
     const child = spawn('claude', args, {
       env,
       stdio: ['pipe', 'pipe', 'pipe'],
-      timeout: 600_000, // 10 min
+      timeout: 600_000,
     });
 
     let stdout = '';
     let stderr = '';
 
-    child.stdout.on('data', (chunk: Buffer) => {
-      stdout += chunk.toString();
-    });
-
-    child.stderr.on('data', (chunk: Buffer) => {
-      stderr += chunk.toString();
-    });
+    child.stdout.on('data', (chunk: Buffer) => { stdout += chunk.toString(); });
+    child.stderr.on('data', (chunk: Buffer) => { stderr += chunk.toString(); });
 
     child.on('close', (code) => {
-      if (code === 0) {
-        resolve(stdout.trim() || '(no output)');
-      } else {
-        reject(new Error(`Claude Code exited with code ${code}: ${stderr.trim() || stdout.trim()}`));
-      }
+      if (code === 0) resolve(stdout.trim() || '(no output)');
+      else reject(new Error(`Claude Code exited with code ${code}: ${stderr.trim() || stdout.trim()}`));
     });
 
     child.on('error', (err) => {
@@ -182,4 +261,3 @@ function executeViaClaudeCode(prompt: string, missionId: string): Promise<string
     });
   });
 }
-

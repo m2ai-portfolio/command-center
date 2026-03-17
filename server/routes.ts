@@ -4,6 +4,7 @@ import {
   listMissions,
   getMissionLogs,
   listAgents,
+  getOutcomeStats,
 } from './db.js';
 import {
   proposeMission,
@@ -120,4 +121,11 @@ router.get('/status/:id', (req, res) => {
     summary: (lastLog as Record<string, unknown> | null)?.message ?? mission.goal,
     progress_pct: mission.status === 'completed' ? 100 : mission.status === 'running' ? 50 : 0,
   });
+});
+
+// ── Outcome Stats ────────────────────────────────────────────────────
+
+router.get('/stats', (_req, res) => {
+  const stats = getOutcomeStats();
+  res.json({ stats });
 });

@@ -58,9 +58,21 @@ export function initDatabase(): Database.Database {
       active_mission_id TEXT
     );
 
+    CREATE TABLE IF NOT EXISTS outcome_logs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      mission_id TEXT NOT NULL REFERENCES missions(id),
+      task_type TEXT NOT NULL,
+      agent_id TEXT NOT NULL,
+      classification_reasoning TEXT,
+      status TEXT NOT NULL,
+      duration_ms INTEGER,
+      created_at INTEGER NOT NULL
+    );
+
     CREATE INDEX IF NOT EXISTS idx_missions_status ON missions(status);
     CREATE INDEX IF NOT EXISTS idx_mission_logs_mission ON mission_logs(mission_id);
     CREATE INDEX IF NOT EXISTS idx_agents_status ON agents(status);
+    CREATE INDEX IF NOT EXISTS idx_outcome_logs_agent ON outcome_logs(agent_id);
   `);
 
   return db;
@@ -159,4 +171,35 @@ export function updateAgentStatus(id: string, status: string, activeMissionId?: 
   getDb().prepare(
     'UPDATE agents SET status = ?, active_mission_id = ? WHERE id = ?'
   ).run(status, activeMissionId ?? null, id);
+}
+
+// ── Outcome Logging ──────────────────────────────────────────────────
+
+export function logOutcome(
+  missionId: string,
+  taskType: string,
+  agentId: string,
+  reasoning: string,
+  status: string,
+  durationMs?: number,
+): void {
+  const now = Math.floor(Date.now() / 1000);
+  getDb().prepare(
+    'INSERT INTO outcome_logs (mission_id, task_type, agent_id, classification_reasoning, status, duration_ms, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)'
+  ).run(missionId, taskType, agentId, reasoning, status, durationMs ?? null, now);
+}
+
+export function getOutcomeStats() {
+  const rows = getDb().prepare(`
+    SELECT
+      agent_id,
+      task_type,
+      COUNT(*) as total,
+      SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as successes,
+      AVG(duration_ms) as avg_duration_ms
+    FROM outcome_logs
+    GROUP BY agent_id, task_type
+    ORDER BY total DESC
+  `).all();
+  return rows;
 }
