@@ -9,6 +9,8 @@ import {
   updateAgentStatus,
   logOutcome,
 } from './db.js';
+import { getStockAgentPrompt } from './stock-loader.js';
+import { getCustomAgentPrompt } from './custom-agents.js';
 import type { Mission, MissionPlan, AgentCard } from '../shared/types.js';
 import type { A2ATaskRequest, A2ATaskStatus } from '../shared/a2a.js';
 
@@ -133,8 +135,18 @@ export async function approveMission(missionId: string): Promise<void> {
       addMissionLog(missionId, 'info', `Using A2A protocol → ${a2aEndpoint}`);
       result = await executeViaA2A(a2aEndpoint, missionId, mission.goal as string);
     } else {
-      addMissionLog(missionId, 'info', 'No A2A endpoint — using direct Claude Code');
-      result = await executeViaClaudeCode(mission.goal as string, missionId);
+      // Check if this is a custom or stock agent with a markdown prompt
+      const customPrompt = getCustomAgentPrompt(agentId);
+      const stockPrompt = customPrompt ? null : getStockAgentPrompt(agentId);
+      const agentPrompt = customPrompt || stockPrompt;
+      if (agentPrompt) {
+        const promptType = customPrompt ? 'custom' : 'stock';
+        addMissionLog(missionId, 'info', `Using ${promptType} agent prompt for ${agentId}`);
+        result = await executeViaClaudeCode(mission.goal as string, missionId, agentPrompt);
+      } else {
+        addMissionLog(missionId, 'info', 'No A2A endpoint — using direct Claude Code');
+        result = await executeViaClaudeCode(mission.goal as string, missionId);
+      }
     }
 
     const durationMs = Date.now() - startTime;
@@ -169,8 +181,14 @@ export async function approveMission(missionId: string): Promise<void> {
 }
 
 export function cancelMission(missionId: string): void {
+  const mission = getMission(missionId);
   updateMission(missionId, { status: 'cancelled' });
   addMissionLog(missionId, 'info', 'Mission cancelled');
+
+  // Reset agent status if it was assigned
+  if (mission?.agent_id) {
+    updateAgentStatus(mission.agent_id as string, 'available', null);
+  }
 }
 
 // ── A2A Dispatch ─────────────────────────────────────────────────────
@@ -202,6 +220,7 @@ async function executeViaA2A(endpoint: string, missionId: string, goal: string):
   const maxWait = 660_000; // 11 min (give agent 10 min + buffer)
   const pollInterval = 3_000;
   const startPoll = Date.now();
+  let lastProgress = '';
 
   while (Date.now() - startPoll < maxWait) {
     await new Promise(resolve => setTimeout(resolve, pollInterval));
@@ -219,8 +238,9 @@ async function executeViaA2A(endpoint: string, missionId: string, goal: string):
       throw new Error(`Agent failed: ${status.error ?? 'unknown error'}`);
     }
 
-    // Log progress if there's a new message
-    if (status.progress) {
+    // Log progress only when the message changes (prevents log spam)
+    if (status.progress && status.progress !== lastProgress) {
+      lastProgress = status.progress;
       addMissionLog(missionId, 'progress', `Agent: ${status.progress}`);
     }
   }
@@ -230,9 +250,17 @@ async function executeViaA2A(endpoint: string, missionId: string, goal: string):
 
 // ── Direct Claude Code Dispatch (fallback) ───────────────────────────
 
-function executeViaClaudeCode(prompt: string, missionId: string): Promise<string> {
+function executeViaClaudeCode(prompt: string, missionId: string, systemPrompt?: string): Promise<string> {
   return new Promise((resolve, reject) => {
-    const args = ['--print', prompt, '--output-format', 'text'];
+    const args = [
+      '--print', prompt,
+      '--output-format', 'text',
+      '--allowedTools', 'Read', 'Glob', 'Grep', 'Write', 'Edit', 'Bash',
+      '--max-turns', '25',
+    ];
+    if (systemPrompt) {
+      args.push('--append-system-prompt', systemPrompt);
+    }
 
     const env = { ...process.env };
     delete env.ANTHROPIC_API_KEY;
@@ -241,15 +269,22 @@ function executeViaClaudeCode(prompt: string, missionId: string): Promise<string
 
     const child = spawn('claude', args, {
       env,
-      stdio: ['pipe', 'pipe', 'pipe'],
-      timeout: 600_000,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      timeout: 900_000,
     });
 
     let stdout = '';
     let stderr = '';
 
     child.stdout.on('data', (chunk: Buffer) => { stdout += chunk.toString(); });
-    child.stderr.on('data', (chunk: Buffer) => { stderr += chunk.toString(); });
+    child.stderr.on('data', (chunk: Buffer) => {
+      const text = chunk.toString();
+      stderr += text;
+      const lines = text.trim().split('\n').filter(Boolean);
+      for (const line of lines) {
+        addMissionLog(missionId, 'progress', `Claude: ${line.slice(0, 200)}`);
+      }
+    });
 
     child.on('close', (code) => {
       if (code === 0) resolve(stdout.trim() || '(no output)');

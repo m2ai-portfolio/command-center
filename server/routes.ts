@@ -11,6 +11,19 @@ import {
   approveMission,
   cancelMission,
 } from './orchestrator.js';
+import {
+  syncStockRepos,
+  listStockAgents,
+  loadStockAgent,
+  loadStockCategory,
+} from './stock-loader.js';
+import {
+  listCustomAgents,
+  getCustomAgent,
+  createCustomAgent,
+  updateCustomAgent,
+  deleteCustomAgent,
+} from './custom-agents.js';
 import type { CreateMissionRequest } from '../shared/types.js';
 
 export const router = Router();
@@ -128,4 +141,129 @@ router.get('/status/:id', (req, res) => {
 router.get('/stats', (_req, res) => {
   const stats = getOutcomeStats();
   res.json({ stats });
+});
+
+// ── Stock Agents ────────────────────────────────────────────────────
+
+router.post('/stock-agents/sync', (_req, res) => {
+  try {
+    const result = syncStockRepos();
+    res.json({ message: 'Stock repos synced', ...result });
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+router.get('/stock-agents', (_req, res) => {
+  const agents = listStockAgents();
+  const categories = [...new Set(agents.map(a => a.category))].sort();
+  res.json({
+    total: agents.length,
+    categories,
+    agents: agents.map(a => ({
+      id: a.id,
+      name: a.name,
+      description: a.description,
+      category: a.category,
+      source: a.source,
+      skills: a.skills,
+    })),
+  });
+});
+
+// ── Custom Agents ──────────────────────────────────────────────────
+
+router.get('/custom-agents', (_req, res) => {
+  const agents = listCustomAgents();
+  res.json({ agents });
+});
+
+router.get('/custom-agents/:id', (req, res) => {
+  const agent = getCustomAgent(req.params.id);
+  if (!agent) {
+    res.status(404).json({ error: 'Custom agent not found' });
+    return;
+  }
+  res.json({ agent });
+});
+
+router.post('/custom-agents', (req, res) => {
+  const { name, description, skills, system_prompt } = req.body as {
+    name?: string;
+    description?: string;
+    skills?: string[];
+    system_prompt?: string;
+  };
+
+  if (!name || !name.trim()) {
+    res.status(400).json({ error: 'Name is required' });
+    return;
+  }
+  if (!system_prompt || !system_prompt.trim()) {
+    res.status(400).json({ error: 'System prompt is required' });
+    return;
+  }
+
+  try {
+    const agent = createCustomAgent({
+      name: name.trim(),
+      description: (description || '').trim(),
+      skills: skills || [],
+      system_prompt: system_prompt.trim(),
+    });
+    res.status(201).json({ agent });
+  } catch (err) {
+    res.status(409).json({ error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+router.put('/custom-agents/:id', (req, res) => {
+  const { name, description, skills, system_prompt } = req.body as {
+    name?: string;
+    description?: string;
+    skills?: string[];
+    system_prompt?: string;
+  };
+
+  try {
+    const agent = updateCustomAgent(req.params.id, { name, description, skills, system_prompt });
+    res.json({ agent });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    const status = msg.includes('not found') ? 404 : 400;
+    res.status(status).json({ error: msg });
+  }
+});
+
+router.delete('/custom-agents/:id', (req, res) => {
+  const deleted = deleteCustomAgent(req.params.id);
+  if (!deleted) {
+    res.status(404).json({ error: 'Custom agent not found' });
+    return;
+  }
+  res.json({ message: 'Custom agent deleted' });
+});
+
+// ── Stock Agents ────────────────────────────────────────────────────
+
+router.post('/stock-agents/load', (req, res) => {
+  const { agent_id, category } = req.body as { agent_id?: string; category?: string };
+
+  if (agent_id) {
+    const agent = loadStockAgent(agent_id);
+    if (!agent) {
+      res.status(404).json({ error: `Stock agent ${agent_id} not found` });
+      return;
+    }
+    res.json({ message: 'Agent loaded into registry', agent });
+    return;
+  }
+
+  if (category) {
+    const agents = loadStockCategory(category);
+    res.json({ message: `Loaded ${agents.length} agents from ${category}`, agents });
+    return;
+  }
+
+  res.status(400).json({ error: 'Provide agent_id or category' });
 });

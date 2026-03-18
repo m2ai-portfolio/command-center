@@ -25,5 +25,31 @@ module.exports = {
       max_restarts: 10,
       min_uptime: '10s',
     },
+    {
+      name: 'agent-coding',
+      script: 'node_modules/.bin/tsx',
+      args: 'agents/coding/index.ts',
+      cwd: __dirname,
+      env: {
+        NODE_ENV: 'production',
+        CODING_AGENT_PORT: '3144',
+      },
+      exp_backoff_restart_delay: 1000,
+      max_restarts: 10,
+      min_uptime: '10s',
+    },
+    {
+      name: 'agent-content',
+      script: 'node_modules/.bin/tsx',
+      args: 'agents/content/index.ts',
+      cwd: __dirname,
+      env: {
+        NODE_ENV: 'production',
+        CONTENT_AGENT_PORT: '3145',
+      },
+      exp_backoff_restart_delay: 1000,
+      max_restarts: 10,
+      min_uptime: '10s',
+    },
   ],
 };

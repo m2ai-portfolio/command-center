@@ -3,4 +3,6 @@ dist/
 store/*.db
 store/*.db-wal
 store/*.db-shm
+store/stock-repos/
+store/custom-agents/
 .env

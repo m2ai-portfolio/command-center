@@ -6,12 +6,12 @@ import type { AgentConfig } from '../runtime/agent-config.js';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const config: AgentConfig = {
-  id: 'research',
-  name: 'Soundwave',
-  description: 'Deep web research, database analysis, and structured reporting.',
-  skills: ['research', 'analysis', 'reporting', 'web-search'],
+  id: 'content',
+  name: 'Content Agent',
+  description: 'Writing and content specialist — blog posts, documentation, social media, email drafts, reports, and marketing copy.',
+  skills: ['content', 'writing', 'documentation', 'social-media', 'editing'],
   type: 'named',
-  port: parseInt(process.env.RESEARCH_AGENT_PORT ?? '3143', 10),
+  port: parseInt(process.env.CONTENT_AGENT_PORT ?? '3145', 10),
   system_prompt_path: path.resolve(__dirname, 'AGENT.md'),
   accepts: ['text/plain'],
   produces: ['text/plain', 'text/markdown'],

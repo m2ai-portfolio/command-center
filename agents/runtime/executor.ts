@@ -3,31 +3,28 @@ import { updateTask, addTaskLog } from './task-store.js';
 
 /**
  * Execute a task via Claude Code CLI with the agent's system prompt.
- * Updates the task store with progress and results.
+ * Uses --append-system-prompt for agent instructions (separate from user goal).
+ * Uses --allowedTools to prevent interactive permission prompts in headless mode.
  */
 export async function executeTask(
   taskId: string,
   goal: string,
   systemPrompt: string,
   context?: string,
-  timeoutMs = 600_000,
+  timeoutMs = 900_000,
 ): Promise<void> {
   updateTask(taskId, { state: 'running' });
   addTaskLog(taskId, 'info', 'Starting Claude Code session...');
 
   const startTime = Date.now();
 
-  // Build the full prompt with system prompt + context + goal
-  const parts: string[] = [];
-  parts.push(`[Agent Instructions]\n${systemPrompt}\n[End Agent Instructions]`);
-  if (context) {
-    parts.push(`[Context]\n${context}\n[End Context]`);
-  }
-  parts.push(goal);
-  const fullPrompt = parts.join('\n\n');
+  // Build user prompt with optional context
+  const userPrompt = context
+    ? `[Context]\n${context}\n[End Context]\n\n${goal}`
+    : goal;
 
   try {
-    const result = await runClaudeCode(fullPrompt, timeoutMs);
+    const result = await runClaudeCode(userPrompt, systemPrompt, timeoutMs);
     const durationMs = Date.now() - startTime;
 
     updateTask(taskId, {
@@ -49,9 +46,15 @@ export async function executeTask(
   }
 }
 
-function runClaudeCode(prompt: string, timeoutMs: number): Promise<string> {
+function runClaudeCode(prompt: string, systemPrompt: string, timeoutMs: number): Promise<string> {
   return new Promise((resolve, reject) => {
-    const args = ['--print', prompt, '--output-format', 'text'];
+    const args = [
+      '--print', prompt,
+      '--output-format', 'text',
+      '--append-system-prompt', systemPrompt,
+      '--allowedTools', 'Read', 'Glob', 'Grep', 'Write', 'Edit', 'Bash',
+      '--max-turns', '25',
+    ];
 
     // Build env without ANTHROPIC_API_KEY (use Max OAuth)
     const env = { ...process.env };
@@ -59,7 +62,7 @@ function runClaudeCode(prompt: string, timeoutMs: number): Promise<string> {
 
     const child = spawn('claude', args, {
       env,
-      stdio: ['pipe', 'pipe', 'pipe'],
+      stdio: ['ignore', 'pipe', 'pipe'],
       timeout: timeoutMs,
     });
 
@@ -71,7 +74,13 @@ function runClaudeCode(prompt: string, timeoutMs: number): Promise<string> {
     });
 
     child.stderr.on('data', (chunk: Buffer) => {
-      stderr += chunk.toString();
+      const text = chunk.toString();
+      stderr += text;
+      // Log stderr lines as progress for visibility
+      const lines = text.trim().split('\n').filter(Boolean);
+      for (const line of lines) {
+        addTaskLog(taskId, 'progress', line.slice(0, 200));
+      }
     });
 
     child.on('close', (code) => {

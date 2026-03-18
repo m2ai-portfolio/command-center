@@ -23,4 +23,28 @@ export const api = {
   cancelMission: (id: string) => fetchJson<{ message: string }>(`/missions/${id}/cancel`, { method: 'POST' }),
   listAgents: () => fetchJson<{ agents: unknown[] }>('/agents'),
   getStatus: () => fetchJson<unknown>('/status'),
+
+  // Custom agents
+  listCustomAgents: () => fetchJson<{ agents: unknown[] }>('/custom-agents'),
+  getCustomAgent: (id: string) => fetchJson<{ agent: unknown }>(`/custom-agents/${id}`),
+  createCustomAgent: (data: { name: string; description: string; skills: string[]; system_prompt: string }) =>
+    fetchJson<{ agent: unknown }>('/custom-agents', { method: 'POST', body: JSON.stringify(data) }),
+  updateCustomAgent: (id: string, data: { name?: string; description?: string; skills?: string[]; system_prompt?: string }) =>
+    fetchJson<{ agent: unknown }>(`/custom-agents/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
+  deleteCustomAgent: (id: string) =>
+    fetchJson<{ message: string }>(`/custom-agents/${id}`, { method: 'DELETE' }),
+
+  // Stock agents
+  listStockAgents: () => fetchJson<{ total: number; categories: string[]; agents: unknown[] }>('/stock-agents'),
+  syncStockRepos: () => fetchJson<{ message: string }>('/stock-agents/sync', { method: 'POST' }),
+  loadStockAgent: (agentId: string) =>
+    fetchJson<{ message: string; agent: unknown }>('/stock-agents/load', {
+      method: 'POST',
+      body: JSON.stringify({ agent_id: agentId }),
+    }),
+  loadStockCategory: (category: string) =>
+    fetchJson<{ message: string; agents: unknown[] }>('/stock-agents/load', {
+      method: 'POST',
+      body: JSON.stringify({ category }),
+    }),
 };

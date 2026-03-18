@@ -10,17 +10,37 @@ export function seedDefaultAgents(): void {
     'claude-code',
     'Claude Code',
     'General-purpose coding and task execution via Claude Code CLI',
-    ['coding', 'general', 'ops', 'content'],
+    ['general', 'ops'],
     'stock'
   );
 
-  // Research Agent — A2A enabled, Soundwave-based
+  // Soundwave — Research Agent, A2A enabled
   upsertAgent(
     'research',
-    'Research Agent',
+    'Soundwave',
     'Deep web research, database analysis, and structured reporting',
     ['research', 'analysis', 'reporting', 'web-search'],
     'named'
   );
   registerA2AAgent('research', 'http://localhost:3143');
+
+  // Ravage — Coding Agent, A2A enabled
+  upsertAgent(
+    'coding',
+    'Ravage',
+    'Software engineering — write, modify, debug, refactor, and review code',
+    ['coding', 'debugging', 'refactoring', 'testing', 'git'],
+    'named'
+  );
+  registerA2AAgent('coding', 'http://localhost:3144');
+
+  // Content Agent — A2A enabled, writing specialist
+  upsertAgent(
+    'content',
+    'Content Agent',
+    'Writing and content — blog posts, documentation, social media, email drafts',
+    ['content', 'writing', 'documentation', 'social-media', 'editing'],
+    'named'
+  );
+  registerA2AAgent('content', 'http://localhost:3145');
 }
