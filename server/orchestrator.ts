@@ -8,6 +8,8 @@ import {
   listAgents,
   updateAgentStatus,
   logOutcome,
+  updateOutcomeScores,
+  setMissionJudgeVerdict,
   getAgentCapabilities,
   listAgentCapabilities,
   getRoutingWeight,
@@ -17,7 +19,11 @@ import {
 } from './db.js';
 import { getStockAgentPrompt } from './stock-loader.js';
 import { getCustomAgentPrompt } from './custom-agents.js';
+import { planMission } from './planner.js';
+import { judgeMission } from './judge.js';
+import { executeMission as executeViaWorkerManager } from './worker-manager.js';
 import type { Mission, MissionPlan, AgentCard } from '../shared/types.js';
+import { DIMENSION_WEIGHTS, computeCompositeScore } from '../shared/types.js';
 import type { A2ATaskRequest, A2ATaskStatus } from '../shared/a2a.js';
 
 // ── A2A Agent Registry ───────────────────────────────────────────────
@@ -132,12 +138,21 @@ function findCapableAgent(agents: AgentCard[], required: RequiredCapabilities, t
         score -= 20;
       }
 
-      // Learned routing weight (dynamic — grows with data)
+      // Learned routing weight (dynamic — dimensional quality scores from Judge)
       const weight = weightMap.get(`${agent.id}:${taskType}`);
       if (weight && weight.total_missions >= 3) {
-        // Scale: 0% success = -10, 50% = 0, 100% = +10
-        const learnedBonus = (weight.success_rate - 0.5) * 20;
-        score += learnedBonus;
+        // If dimensional scores exist, compute weighted composite for this task type
+        if (weight.correctness_avg != null && weight.completeness_avg != null && weight.relevance_avg != null) {
+          const w = DIMENSION_WEIGHTS[taskType] ?? DIMENSION_WEIGHTS.general;
+          const composite = weight.correctness_avg * w.correctness
+            + weight.completeness_avg * w.completeness
+            + weight.relevance_avg * w.relevance;
+          // Scale: 0.0 composite = -10, 0.5 = 0, 1.0 = +10
+          score += (composite - 0.5) * 20;
+        } else {
+          // Fallback to flat success_rate when no Judge data yet
+          score += (weight.success_rate - 0.5) * 20;
+        }
       }
 
       return { agent, score };
@@ -208,34 +223,49 @@ export function classifyIntent(goal: string): ClassificationResult {
 
 // ── Mission Lifecycle ────────────────────────────────────────────────
 
-export function proposeMission(goal: string): { mission: Mission; classification: ClassificationResult } {
+export async function proposeMission(goal: string): Promise<{ mission: Mission; classification: ClassificationResult }> {
   const id = uuidv4();
   const classification = classifyIntent(goal);
 
   createMission(id, goal);
 
-  const plan: MissionPlan = {
-    reasoning: classification.reasoning,
-    subtasks: [{
-      id: uuidv4(),
-      description: goal,
-      agent_id: classification.suggested_agent ?? 'claude-code',
-      status: 'pending',
-      result: null,
-      depends_on: [],
-    }],
-    needs_clarification: false,
-  };
+  addMissionLog(id, 'info', `Mission proposed: ${goal}`);
+  addMissionLog(id, 'info', `Classification: ${classification.task_type} (${classification.complexity})`);
+
+  // Phase 5.1: Sonnet planner decomposes goal into subtasks
+  addMissionLog(id, 'info', 'Planner: decomposing goal into subtasks...');
+  let plan: MissionPlan;
+  try {
+    plan = await planMission(goal);
+    addMissionLog(id, 'info', `Planner: ${plan.subtasks.length} subtask(s) — ${plan.reasoning}`);
+  } catch (err) {
+    // Fallback to single-subtask plan
+    console.error('Planner failed for mission', id, err);
+    plan = {
+      reasoning: classification.reasoning,
+      subtasks: [{
+        id: uuidv4(),
+        description: goal,
+        agent_id: classification.suggested_agent ?? 'claude-code',
+        status: 'pending',
+        result: null,
+        depends_on: [],
+      }],
+      needs_clarification: false,
+    };
+    addMissionLog(id, 'info', 'Planner fallback: single subtask');
+  }
+
+  // Use first subtask's agent or classification suggestion as primary
+  const primaryAgent = plan.subtasks[0]?.agent_id ?? classification.suggested_agent ?? 'claude-code';
 
   updateMission(id, {
     plan,
-    agent_id: classification.suggested_agent ?? 'claude-code',
+    agent_id: primaryAgent,
   });
 
-  addMissionLog(id, 'info', `Mission proposed: ${goal}`);
-  addMissionLog(id, 'info', `Classification: ${classification.task_type} (${classification.complexity})`);
   if (classification.suggested_agent) {
-    addMissionLog(id, 'info', `Suggested agent: ${classification.suggested_agent}`);
+    addMissionLog(id, 'info', `Primary agent: ${primaryAgent}`);
   }
   if (classification.gap.detected) {
     addMissionLog(id, 'info', `Capability gap: missing [${classification.gap.missing.join(', ')}]`);
@@ -251,7 +281,42 @@ export async function approveMission(missionId: string): Promise<void> {
   if (!mission) throw new Error(`Mission ${missionId} not found`);
 
   const agentId = (mission.agent_id as string) ?? 'stock-fallback';
+  const subtaskCount = mission.plan?.subtasks?.length ?? 1;
 
+  // Phase 5.2: Multi-subtask missions route through Worker Manager
+  if (subtaskCount > 1) {
+    updateMission(missionId, { status: 'running' });
+    addMissionLog(missionId, 'info', `Mission approved — routing ${subtaskCount} subtasks to Worker Manager`);
+
+    const startTime = Date.now();
+    try {
+      await executeViaWorkerManager(missionId);
+
+      const durationMs = Date.now() - startTime;
+      // Worker Manager already set mission status and result
+      const completed = getMission(missionId);
+      updateMission(missionId, { duration_ms: durationMs });
+      addMissionLog(missionId, 'info', `Mission finished via Worker Manager in ${Math.round(durationMs / 1000)}s`);
+
+      const planReasoning = mission.plan?.reasoning ?? '';
+      const taskType = inferTaskType(planReasoning, mission.goal as string);
+      logOutcome(missionId, taskType, agentId, planReasoning, completed?.status as string ?? 'completed', durationMs);
+      runJudgeAsync(missionId, mission.goal as string, completed?.result as string ?? '', taskType, agentId, completed?.status as string ?? 'completed', durationMs);
+    } catch (err) {
+      const durationMs = Date.now() - startTime;
+      const errMsg = err instanceof Error ? err.message : String(err);
+      updateMission(missionId, { status: 'failed', result: errMsg, duration_ms: durationMs });
+      addMissionLog(missionId, 'error', `Worker Manager failed: ${errMsg}`);
+
+      const planReasoning = mission.plan?.reasoning ?? '';
+      const taskType = inferTaskType(planReasoning, mission.goal as string);
+      logOutcome(missionId, taskType, agentId, planReasoning, 'failed', durationMs);
+      runJudgeAsync(missionId, mission.goal as string, errMsg, taskType, agentId, 'failed', durationMs);
+    }
+    return;
+  }
+
+  // Single-subtask missions: existing dispatch path
   // Check if agent is busy — queue instead of failing
   const agents = listAgents() as AgentCard[];
   const agent = agents.find(a => a.id === agentId);
@@ -262,7 +327,7 @@ export async function approveMission(missionId: string): Promise<void> {
   }
 
   updateMission(missionId, { status: 'running' });
-  addMissionLog(missionId, 'info', 'Mission approved — executing');
+  addMissionLog(missionId, 'info', 'Mission approved — executing (single subtask)');
   updateAgentStatus(agentId, 'busy', missionId);
 
   const startTime = Date.now();
@@ -307,9 +372,11 @@ export async function approveMission(missionId: string): Promise<void> {
 
     // Log outcome for routing quality tracking
     const planReasoning = mission.plan?.reasoning ?? '';
-    const taskType = planReasoning.match(/Classified as (\w+)/)?.[1] ?? 'unknown';
+    const taskType = inferTaskType(planReasoning, mission.goal as string);
     logOutcome(missionId, taskType, agentId, planReasoning, 'completed', durationMs);
-    updateRoutingWeight(agentId, taskType);
+
+    // Phase 5.3/5.4: Async Judge evaluation — does not block mission completion
+    runJudgeAsync(missionId, mission.goal as string, result, taskType, agentId, 'completed', durationMs);
   } catch (err) {
     const durationMs = Date.now() - startTime;
     const errMsg = err instanceof Error ? err.message : String(err);
@@ -321,9 +388,11 @@ export async function approveMission(missionId: string): Promise<void> {
     addMissionLog(missionId, 'error', `Mission failed: ${errMsg}`);
 
     const planReasoning = mission.plan?.reasoning ?? '';
-    const taskType = planReasoning.match(/Classified as (\w+)/)?.[1] ?? 'unknown';
+    const taskType = inferTaskType(planReasoning, mission.goal as string);
     logOutcome(missionId, taskType, agentId, planReasoning, 'failed', durationMs);
-    updateRoutingWeight(agentId, taskType);
+
+    // Judge also evaluates failures — to score partial quality
+    runJudgeAsync(missionId, mission.goal as string, errMsg, taskType, agentId, 'failed', durationMs);
   } finally {
     updateAgentStatus(agentId, 'available', null);
   }
@@ -458,4 +527,66 @@ function executeViaClaudeCode(
       reject(new Error(`Failed to spawn Claude Code: ${err.message}`));
     });
   });
+}
+
+// ── Task Type Inference ───────────────────────────────────────────
+
+function inferTaskType(planReasoning: string, goal: string): string {
+  // Try to extract from planner/classifier reasoning
+  const fromPlan = planReasoning.match(/(?:Classified as|type:)\s*(\w+)/i)?.[1];
+  if (fromPlan && ['coding', 'research', 'content', 'ops', 'general'].includes(fromPlan)) {
+    return fromPlan;
+  }
+  // Fallback: re-classify from goal
+  return classifyIntent(goal).task_type;
+}
+
+// ── Async Judge Evaluation ────────────────────────────────────────
+
+function runJudgeAsync(
+  missionId: string,
+  goal: string,
+  result: string,
+  taskType: string,
+  agentId: string,
+  status: string,
+  durationMs: number,
+): void {
+  // Fire-and-forget — judge runs in background
+  addMissionLog(missionId, 'info', 'Judge: evaluating mission quality...');
+
+  judgeMission(goal, result, taskType, status, durationMs)
+    .then(verdict => {
+      addMissionLog(missionId, 'info',
+        `Judge verdict: ${verdict.passed ? 'PASS' : 'FAIL'} ` +
+        `(composite: ${(verdict.composite_score * 100).toFixed(0)}% — ` +
+        `correctness: ${(verdict.quality_scores.correctness * 100).toFixed(0)}%, ` +
+        `completeness: ${(verdict.quality_scores.completeness * 100).toFixed(0)}%, ` +
+        `relevance: ${(verdict.quality_scores.relevance * 100).toFixed(0)}%) ` +
+        `[${verdict.method}]`
+      );
+      addMissionLog(missionId, 'info', `Judge reasoning: ${verdict.reasoning}`);
+
+      // Persist verdict on the mission
+      setMissionJudgeVerdict(missionId, verdict);
+
+      // Update outcome_logs with quality scores
+      updateOutcomeScores(missionId, {
+        correctness: verdict.quality_scores.correctness,
+        completeness: verdict.quality_scores.completeness,
+        relevance: verdict.quality_scores.relevance,
+        compositeScore: verdict.composite_score,
+        judgeReasoning: verdict.reasoning,
+        judgeMethod: verdict.method,
+      });
+
+      // Recalculate routing weights with dimensional data
+      updateRoutingWeight(agentId, taskType);
+    })
+    .catch(err => {
+      console.error('Judge evaluation failed for mission', missionId, err);
+      addMissionLog(missionId, 'error', `Judge failed: ${err instanceof Error ? err.message : String(err)}`);
+      // Still update routing weights with pass/fail only
+      updateRoutingWeight(agentId, taskType);
+    });
 }

@@ -25,9 +25,11 @@ export interface MissionSubtask {
   id: string;
   description: string;
   agent_id: string;
-  status: 'pending' | 'running' | 'completed' | 'failed';
+  status: 'pending' | 'queued' | 'running' | 'completed' | 'failed' | 'cancelled' | 'retrying';
   result: string | null;
   depends_on: string[];
+  duration_ms?: number | null;
+  task_type?: string;
 }
 
 // ── Agent Types ──────────────────────────────────────────────────────
@@ -54,6 +56,75 @@ export interface MissionLog {
   message: string;
   agent_id: string | null;
 }
+
+// ── Quality Evaluation Types (Phase 5 — Planner-Worker-Judge) ────
+
+export interface QualityScores {
+  correctness: number;   // 0-1: Did the output achieve what was asked?
+  completeness: number;  // 0-1: Were all parts of the request addressed?
+  relevance: number;     // 0-1: Is the output on-topic and well-targeted?
+}
+
+export interface JudgeVerdict {
+  passed: boolean;
+  quality_scores: QualityScores;
+  composite_score: number; // 0-1: weighted average per task type
+  reasoning: string;
+  evaluated_at: number;    // unix timestamp
+  method: 'algorithmic' | 'llm' | 'both';
+}
+
+/** Per-task-type dimension weights for composite score calculation. */
+export const DIMENSION_WEIGHTS: Record<string, QualityScores> = {
+  coding:   { correctness: 0.6, completeness: 0.2, relevance: 0.2 },
+  research: { correctness: 0.2, completeness: 0.5, relevance: 0.3 },
+  content:  { correctness: 0.2, completeness: 0.3, relevance: 0.5 },
+  ops:      { correctness: 0.5, completeness: 0.3, relevance: 0.2 },
+  general:  { correctness: 0.34, completeness: 0.33, relevance: 0.33 },
+};
+
+export function computeCompositeScore(scores: QualityScores, taskType: string): number {
+  const w = DIMENSION_WEIGHTS[taskType] ?? DIMENSION_WEIGHTS.general;
+  return scores.correctness * w.correctness + scores.completeness * w.completeness + scores.relevance * w.relevance;
+}
+
+// ── Worker Manager Types (Phase 5.2) ─────────────────────────────
+
+export type WorkerSlotStatus = 'idle' | 'running' | 'completed' | 'failed';
+
+export interface WorkerSlot {
+  id: number;               // 0-based slot index
+  mission_id: string | null;
+  subtask_id: string | null;
+  pid: number | null;
+  status: WorkerSlotStatus;
+  worktree_path: string | null;
+  started_at: number | null; // unix timestamp
+}
+
+export interface SubtaskExecution {
+  subtask_id: string;
+  mission_id: string;
+  status: 'pending' | 'queued' | 'running' | 'completed' | 'failed' | 'cancelled' | 'retrying';
+  result: string | null;
+  duration_ms: number | null;
+  worker_slot: number | null;
+  retry_count: number;
+}
+
+export interface WorkerPoolConfig {
+  maxWorkers: number;        // default 8
+  burstLimit: number;        // max 12
+  subtaskTimeoutMs: number;  // 15 min default
+  contextDir: string;        // /tmp/cmd-{missionId}
+}
+
+export const DEFAULT_POOL_CONFIG: WorkerPoolConfig = {
+  maxWorkers: 8,
+  burstLimit: 12,
+  subtaskTimeoutMs: 900_000,
+  contextDir: '/tmp',
+};
 
 // ── API Types ────────────────────────────────────────────────────────
 

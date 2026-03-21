@@ -5,6 +5,7 @@ import {
   listMissions,
   getMissionLogs,
   listAgents,
+  listWorkerSlots,
   getOutcomeStats,
   listAgentCapabilities,
   getAgentCapabilities,
@@ -27,6 +28,7 @@ import {
   loadStockAgent,
   loadStockCategory,
 } from './stock-loader.js';
+import { getPoolStatus } from './worker-manager.js';
 import {
   listCustomAgents,
   getCustomAgent,
@@ -68,17 +70,25 @@ router.get('/missions/:id', (req, res) => {
     return;
   }
   const logs = getMissionLogs(req.params.id);
-  res.json({ mission, logs });
+  // Parse judge verdict if present
+  const judge_verdict = (mission as Record<string, unknown>).judge_verdict
+    ? JSON.parse((mission as Record<string, unknown>).judge_verdict as string)
+    : null;
+  res.json({ mission, logs, judge_verdict });
 });
 
-router.post('/missions', (req, res) => {
+router.post('/missions', async (req, res) => {
   const { goal } = req.body as CreateMissionRequest;
   if (!goal || typeof goal !== 'string' || goal.trim().length === 0) {
     res.status(400).json({ error: 'Goal is required' });
     return;
   }
-  const { mission, classification } = proposeMission(goal.trim());
-  res.status(201).json({ mission, classification });
+  try {
+    const { mission, classification } = await proposeMission(goal.trim());
+    res.status(201).json({ mission, classification });
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+  }
 });
 
 router.post('/missions/:id/approve', (req, res) => {
@@ -338,15 +348,42 @@ router.get('/routing/insights', (_req, res) => {
       success_rate: Math.round(w.success_rate * 100),
       total: w.total_missions,
       avg_duration_s: w.avg_duration_ms ? Math.round(w.avg_duration_ms / 1000) : null,
+      quality: w.correctness_avg != null ? {
+        correctness: Math.round((w.correctness_avg ?? 0) * 100),
+        completeness: Math.round((w.completeness_avg ?? 0) * 100),
+        relevance: Math.round((w.relevance_avg ?? 0) * 100),
+      } : null,
+    }));
+
+  // Quality-aware insights — agents with dimensional data
+  const qualityInsights = weights
+    .filter(w => w.correctness_avg != null && w.total_missions >= 2)
+    .map(w => ({
+      agent_id: w.agent_id,
+      task_type: w.task_type,
+      total: w.total_missions,
+      correctness: Math.round((w.correctness_avg ?? 0) * 100),
+      completeness: Math.round((w.completeness_avg ?? 0) * 100),
+      relevance: Math.round((w.relevance_avg ?? 0) * 100),
     }));
 
   res.json({
     routing_weights: weights,
     gap_patterns: gapPatterns,
     top_performers: topPerformers,
+    quality_insights: qualityInsights,
     total_outcomes: stats.reduce((sum, s) => sum + (s.total as number), 0),
     learning_active: weights.some(w => w.total_missions >= 3),
+    judge_active: weights.some(w => w.correctness_avg != null),
   });
+});
+
+// ── Worker Pool (Phase 5.2) ──────────────────────────────────────────
+
+router.get('/workers', (_req, res) => {
+  const pool = getPoolStatus();
+  const slots = listWorkerSlots(pool.burstLimit);
+  res.json({ pool, slots });
 });
 
 // ── Schedules ────────────────────────────────────────────────────────

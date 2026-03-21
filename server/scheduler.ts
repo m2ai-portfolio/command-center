@@ -45,7 +45,7 @@ async function tick(): Promise<void> {
       console.log(`[Scheduler] Firing schedule "${schedule.id}": ${schedule.goal}`);
 
       // Create and auto-approve the mission
-      const { mission } = proposeMission(schedule.goal);
+      const { mission } = await proposeMission(schedule.goal);
       approveMission(mission.id).catch(err => {
         console.error(`[Scheduler] Mission ${mission.id} execution error:`, err);
       });

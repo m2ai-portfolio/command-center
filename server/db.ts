@@ -107,6 +107,51 @@ export function initDatabase(): Database.Database {
     CREATE INDEX IF NOT EXISTS idx_outcome_logs_agent ON outcome_logs(agent_id);
   `);
 
+  // Phase 5 schema migrations — add quality scoring columns
+  const migrateSafe = (sql: string) => {
+    try { db.exec(sql); } catch { /* column already exists */ }
+  };
+  // outcome_logs: per-dimension quality scores from Judge
+  migrateSafe('ALTER TABLE outcome_logs ADD COLUMN correctness REAL');
+  migrateSafe('ALTER TABLE outcome_logs ADD COLUMN completeness REAL');
+  migrateSafe('ALTER TABLE outcome_logs ADD COLUMN relevance REAL');
+  migrateSafe('ALTER TABLE outcome_logs ADD COLUMN composite_score REAL');
+  migrateSafe('ALTER TABLE outcome_logs ADD COLUMN judge_reasoning TEXT');
+  migrateSafe('ALTER TABLE outcome_logs ADD COLUMN judge_method TEXT');
+  // routing_weights: dimensional averages for weighted agent scoring
+  migrateSafe('ALTER TABLE routing_weights ADD COLUMN correctness_avg REAL');
+  migrateSafe('ALTER TABLE routing_weights ADD COLUMN completeness_avg REAL');
+  migrateSafe('ALTER TABLE routing_weights ADD COLUMN relevance_avg REAL');
+  // missions: planner decomposition flag + judge verdict
+  migrateSafe('ALTER TABLE missions ADD COLUMN judge_verdict TEXT');
+
+  // Phase 5.2: Worker pool persistence
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS worker_slots (
+      id INTEGER PRIMARY KEY,
+      mission_id TEXT,
+      subtask_id TEXT,
+      pid INTEGER,
+      status TEXT NOT NULL DEFAULT 'idle',
+      worktree_path TEXT,
+      started_at INTEGER,
+      updated_at INTEGER NOT NULL
+    );
+  `);
+
+  // Initialize pool slots if table is empty (first run)
+  const slotCount = (db.prepare('SELECT COUNT(*) as c FROM worker_slots').get() as { c: number }).c;
+  if (slotCount === 0) {
+    const now = Math.floor(Date.now() / 1000);
+    const insert = db.prepare('INSERT INTO worker_slots (id, status, updated_at) VALUES (?, ?, ?)');
+    for (let i = 0; i < 12; i++) { // Pre-create up to burst limit
+      insert.run(i, 'idle', now);
+    }
+  }
+
+  // Reset any stale 'running' slots from prior crash
+  db.prepare("UPDATE worker_slots SET status = 'idle', mission_id = NULL, subtask_id = NULL, pid = NULL, worktree_path = NULL WHERE status = 'running'").run();
+
   return db;
 }
 
@@ -207,6 +252,21 @@ export function updateAgentStatus(id: string, status: string, activeMissionId?: 
 
 // ── Outcome Logging ──────────────────────────────────────────────────
 
+export interface OutcomeData {
+  missionId: string;
+  taskType: string;
+  agentId: string;
+  reasoning: string;
+  status: string;
+  durationMs?: number;
+  correctness?: number;
+  completeness?: number;
+  relevance?: number;
+  compositeScore?: number;
+  judgeReasoning?: string;
+  judgeMethod?: string;
+}
+
 export function logOutcome(
   missionId: string,
   taskType: string,
@@ -219,6 +279,37 @@ export function logOutcome(
   getDb().prepare(
     'INSERT INTO outcome_logs (mission_id, task_type, agent_id, classification_reasoning, status, duration_ms, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)'
   ).run(missionId, taskType, agentId, reasoning, status, durationMs ?? null, now);
+}
+
+/** Log outcome with full quality scores from Judge. */
+export function logOutcomeWithScores(data: OutcomeData): void {
+  const now = Math.floor(Date.now() / 1000);
+  getDb().prepare(`
+    INSERT INTO outcome_logs (mission_id, task_type, agent_id, classification_reasoning, status, duration_ms,
+      correctness, completeness, relevance, composite_score, judge_reasoning, judge_method, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    data.missionId, data.taskType, data.agentId, data.reasoning, data.status, data.durationMs ?? null,
+    data.correctness ?? null, data.completeness ?? null, data.relevance ?? null,
+    data.compositeScore ?? null, data.judgeReasoning ?? null, data.judgeMethod ?? null, now,
+  );
+}
+
+/** Update quality scores on an existing outcome log (for async judge). */
+export function updateOutcomeScores(missionId: string, scores: {
+  correctness: number; completeness: number; relevance: number;
+  compositeScore: number; judgeReasoning: string; judgeMethod: string;
+}): void {
+  getDb().prepare(`
+    UPDATE outcome_logs SET
+      correctness = ?, completeness = ?, relevance = ?,
+      composite_score = ?, judge_reasoning = ?, judge_method = ?
+    WHERE mission_id = ?
+  `).run(
+    scores.correctness, scores.completeness, scores.relevance,
+    scores.compositeScore, scores.judgeReasoning, scores.judgeMethod,
+    missionId,
+  );
 }
 
 // ── Agent Capabilities ──────────────────────────────────────────────
@@ -331,7 +422,24 @@ export interface RoutingWeight {
   success_rate: number;
   total_missions: number;
   avg_duration_ms: number | null;
+  correctness_avg: number | null;
+  completeness_avg: number | null;
+  relevance_avg: number | null;
   last_updated: number;
+}
+
+function mapRoutingWeight(row: Record<string, unknown>): RoutingWeight {
+  return {
+    agent_id: row.agent_id as string,
+    task_type: row.task_type as string,
+    success_rate: row.success_rate as number,
+    total_missions: row.total_missions as number,
+    avg_duration_ms: row.avg_duration_ms as number | null,
+    correctness_avg: row.correctness_avg as number | null,
+    completeness_avg: row.completeness_avg as number | null,
+    relevance_avg: row.relevance_avg as number | null,
+    last_updated: row.last_updated as number,
+  };
 }
 
 export function getRoutingWeight(agentId: string, taskType: string): RoutingWeight | null {
@@ -339,30 +447,17 @@ export function getRoutingWeight(agentId: string, taskType: string): RoutingWeig
     'SELECT * FROM routing_weights WHERE agent_id = ? AND task_type = ?'
   ).get(agentId, taskType) as Record<string, unknown> | undefined;
   if (!row) return null;
-  return {
-    agent_id: row.agent_id as string,
-    task_type: row.task_type as string,
-    success_rate: row.success_rate as number,
-    total_missions: row.total_missions as number,
-    avg_duration_ms: row.avg_duration_ms as number | null,
-    last_updated: row.last_updated as number,
-  };
+  return mapRoutingWeight(row);
 }
 
 export function listRoutingWeights(): RoutingWeight[] {
   const rows = getDb().prepare('SELECT * FROM routing_weights ORDER BY agent_id, task_type').all() as Array<Record<string, unknown>>;
-  return rows.map(row => ({
-    agent_id: row.agent_id as string,
-    task_type: row.task_type as string,
-    success_rate: row.success_rate as number,
-    total_missions: row.total_missions as number,
-    avg_duration_ms: row.avg_duration_ms as number | null,
-    last_updated: row.last_updated as number,
-  }));
+  return rows.map(mapRoutingWeight);
 }
 
 /**
  * Recalculate routing weight for an agent+task_type from outcome_logs.
+ * Now includes dimensional quality averages from Judge scores.
  * Called after each mission completes or fails.
  */
 export function updateRoutingWeight(agentId: string, taskType: string): void {
@@ -371,24 +466,40 @@ export function updateRoutingWeight(agentId: string, taskType: string): void {
     SELECT
       COUNT(*) as total,
       SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as successes,
-      AVG(duration_ms) as avg_ms
+      AVG(duration_ms) as avg_ms,
+      AVG(correctness) as avg_correctness,
+      AVG(completeness) as avg_completeness,
+      AVG(relevance) as avg_relevance
     FROM outcome_logs
     WHERE agent_id = ? AND task_type = ?
-  `).get(agentId, taskType) as { total: number; successes: number; avg_ms: number | null };
+  `).get(agentId, taskType) as {
+    total: number; successes: number; avg_ms: number | null;
+    avg_correctness: number | null; avg_completeness: number | null; avg_relevance: number | null;
+  };
 
   if (!stats || stats.total === 0) return;
 
   const successRate = stats.successes / stats.total;
 
   getDb().prepare(`
-    INSERT INTO routing_weights (agent_id, task_type, success_rate, total_missions, avg_duration_ms, last_updated)
-    VALUES (?, ?, ?, ?, ?, ?)
+    INSERT INTO routing_weights (agent_id, task_type, success_rate, total_missions, avg_duration_ms,
+      correctness_avg, completeness_avg, relevance_avg, last_updated)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(agent_id, task_type) DO UPDATE SET
-      success_rate=?, total_missions=?, avg_duration_ms=?, last_updated=?
+      success_rate=?, total_missions=?, avg_duration_ms=?,
+      correctness_avg=?, completeness_avg=?, relevance_avg=?, last_updated=?
   `).run(
-    agentId, taskType, successRate, stats.total, stats.avg_ms, now,
-    successRate, stats.total, stats.avg_ms, now,
+    agentId, taskType, successRate, stats.total, stats.avg_ms,
+    stats.avg_correctness, stats.avg_completeness, stats.avg_relevance, now,
+    successRate, stats.total, stats.avg_ms,
+    stats.avg_correctness, stats.avg_completeness, stats.avg_relevance, now,
   );
+}
+
+/** Store judge verdict JSON on a mission. */
+export function setMissionJudgeVerdict(missionId: string, verdict: unknown): void {
+  getDb().prepare('UPDATE missions SET judge_verdict = ? WHERE id = ?')
+    .run(JSON.stringify(verdict), missionId);
 }
 
 // ── Schedules ───────────────────────────────────────────────────────
@@ -436,6 +547,89 @@ export function updateSchedule(id: string, updates: Partial<{ goal: string; cron
 export function deleteSchedule(id: string): boolean {
   const result = getDb().prepare('DELETE FROM schedules WHERE id = ?').run(id);
   return result.changes > 0;
+}
+
+// ── Worker Pool (Phase 5.2) ──────────────────────────────────────────
+
+import type { WorkerSlot } from '../shared/types.js';
+
+export function listWorkerSlots(limit?: number): WorkerSlot[] {
+  const rows = getDb().prepare(
+    `SELECT * FROM worker_slots WHERE id < ? ORDER BY id`
+  ).all(limit ?? 12) as Array<Record<string, unknown>>;
+  return rows.map(row => ({
+    id: row.id as number,
+    mission_id: row.mission_id as string | null,
+    subtask_id: row.subtask_id as string | null,
+    pid: row.pid as number | null,
+    status: row.status as WorkerSlot['status'],
+    worktree_path: row.worktree_path as string | null,
+    started_at: row.started_at as number | null,
+  }));
+}
+
+export function acquireWorkerSlot(
+  slotLimit: number,
+  missionId: string,
+  subtaskId: string,
+): number | null {
+  const now = Math.floor(Date.now() / 1000);
+  const slot = getDb().prepare(
+    `SELECT id FROM worker_slots WHERE status = 'idle' AND id < ? ORDER BY id LIMIT 1`
+  ).get(slotLimit) as { id: number } | undefined;
+  if (!slot) return null;
+
+  getDb().prepare(
+    `UPDATE worker_slots SET status = 'running', mission_id = ?, subtask_id = ?, started_at = ?, updated_at = ? WHERE id = ?`
+  ).run(missionId, subtaskId, now, now, slot.id);
+  return slot.id;
+}
+
+export function updateWorkerSlot(slotId: number, updates: Partial<{
+  status: string; pid: number | null; worktree_path: string | null;
+  mission_id: string | null; subtask_id: string | null;
+}>): void {
+  const now = Math.floor(Date.now() / 1000);
+  const entries: [string, string | number | null][] = Object.entries(updates)
+    .filter(([, v]) => v !== undefined) as [string, string | number | null][];
+  entries.push(['updated_at', now]);
+  const sets = entries.map(([k]) => `${k} = ?`).join(', ');
+  const values = entries.map(([, v]) => v);
+  getDb().prepare(`UPDATE worker_slots SET ${sets} WHERE id = ?`).run(...values, slotId);
+}
+
+export function releaseWorkerSlot(slotId: number): void {
+  const now = Math.floor(Date.now() / 1000);
+  getDb().prepare(
+    `UPDATE worker_slots SET status = 'idle', mission_id = NULL, subtask_id = NULL, pid = NULL, worktree_path = NULL, started_at = NULL, updated_at = ? WHERE id = ?`
+  ).run(now, slotId);
+}
+
+export function getActiveWorkerCount(): number {
+  const row = getDb().prepare(
+    `SELECT COUNT(*) as c FROM worker_slots WHERE status = 'running'`
+  ).get() as { c: number };
+  return row.c;
+}
+
+/** Update a subtask's status/result within the mission's plan JSON. */
+export function updateMissionSubtask(
+  missionId: string,
+  subtaskId: string,
+  updates: { status?: string; result?: string | null; duration_ms?: number },
+): void {
+  const mission = getMission(missionId);
+  if (!mission?.plan) return;
+
+  const plan = mission.plan;
+  const subtask = plan.subtasks.find((s: { id: string }) => s.id === subtaskId);
+  if (!subtask) return;
+
+  if (updates.status) subtask.status = updates.status;
+  if (updates.result !== undefined) subtask.result = updates.result;
+  if (updates.duration_ms !== undefined) subtask.duration_ms = updates.duration_ms;
+
+  updateMission(missionId, { plan });
 }
 
 // ── Outcome Logging ──────────────────────────────────────────────────

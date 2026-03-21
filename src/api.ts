@@ -51,6 +51,12 @@ export const api = {
   deleteSchedule: (id: string) =>
     fetchJson<{ message: string }>(`/schedules/${id}`, { method: 'DELETE' }),
 
+  // Worker pool
+  getWorkerPool: () => fetchJson<{ pool: unknown; slots: unknown[] }>('/workers'),
+
+  // Routing insights
+  getRoutingInsights: () => fetchJson<unknown>('/routing/insights'),
+
   // Stock agents
   listStockAgents: () => fetchJson<{ total: number; categories: string[]; agents: unknown[] }>('/stock-agents'),
   syncStockRepos: () => fetchJson<{ message: string }>('/stock-agents/sync', { method: 'POST' }),

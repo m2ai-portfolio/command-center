@@ -167,12 +167,25 @@ Autonomous orchestrators that collaborate with CMD as equals, not subordinates. 
 ### Mission Orchestration
 - **Capability-aware routing** — Agents scored by skill match + capability match (WebSearch, MCP, sub-agents)
 - **Gap detection** — Detects when a task needs capabilities no available agent has, recommends fixes
-- **Mission lifecycle** — Propose, plan, approve, execute, log outcomes
+- **Mission lifecycle** — Propose, plan, approve, execute, judge, log outcomes
 - **A2A protocol** — Standard agent-to-agent communication (task submission, polling, status)
 - **Multi-path dispatch** — A2A for Named agents, Claude Code spawn for Custom/Stock
 - **Busy agent queueing** — Missions re-queued when target agent is occupied
 - **Outcome logging** — Track routing quality per agent per task type
 - **Scheduled missions** — Recurring missions on configurable intervals (5m, 1h, 24h, 7d)
+
+### Planner-Worker-Judge (Phase 5)
+
+<p align="center">
+  <img src="docs/cmd-planner-worker-judge.png" alt="Planner-Worker-Judge Architecture" width="700" />
+</p>
+
+- **Mission Planner** — Sonnet decomposes every mission into ordered subtasks with dependency chains
+- **Worker Pool** — 8 default / 12 burst parallel worker slots with dependency-aware scheduling
+- **Git worktree isolation** — Coding subtasks run in isolated worktrees; sequential merge with ephemeral conflict-resolution agent
+- **Quality Judge** — Two-layer evaluation: algorithmic pre-checks (free, instant) + Sonnet LLM scoring on correctness, completeness, and relevance
+- **Dimensional routing weights** — Task-type-specific dimension weights (coding: 60% correctness, research: 50% completeness, content: 50% relevance)
+- **Retry + failure handling** — Retry once on failure, cancel dependents, continue independents
 
 ### Ask Data Chat Advisor
 - **Direct Q&A** — `/api/chat` endpoint for quick questions about the system without spawning agents
@@ -181,7 +194,8 @@ Autonomous orchestrators that collaborate with CMD as equals, not subordinates. 
 
 ### Command Center UI
 - **Chat-style mission input** — Type a goal, see classification + suggested agent inline, approve with one click
-- **Mission Detail** — Real-time logs, progress updates, results
+- **Mission Detail** — Subtask timeline, judge verdict card (pass/fail + dimensional scores), real-time logs
+- **Worker Pool status** — Visual indicator of active/available worker slots on dashboard
 - **Named Agents** — Read-only view of Tier 1 agents with capabilities, tools, MCP, tier access matrix
 - **Custom Agents** — Full CRUD for user-defined agents with markdown prompts
 - **Stock Agents** — Browse 300+ templates by category, search, load into registry
@@ -236,6 +250,8 @@ All endpoints are under `/api`:
 | `PUT` | `/schedules/:id` | Update schedule (enable/disable/change interval) |
 | `DELETE` | `/schedules/:id` | Delete schedule |
 | `POST` | `/chat` | Ask Data — lightweight Q&A without agent dispatch |
+| `GET` | `/workers` | Worker pool status — active slots, availability, queue |
+| `GET` | `/routing/insights` | Routing weights, dimensional quality, gap patterns |
 
 Named agents expose standard A2A endpoints:
 
@@ -266,8 +282,8 @@ Named agents expose standard A2A endpoints:
 | Phase 3 | Done | A2A protocol + Research agent (Soundwave) |
 | Phase 4 | Done | Coding agent (Ravage) + Content agent + Stock agent loader + bug fixes |
 | Phase 4B | Done | Access model, Named Agents page, capability-aware routing, gap detection, schedules, chatbot UI, onboarding |
-| Phase 5 | **In Progress** | EGO learning loop — routing weight learning, experiment tracking, quality evaluation. Freudian model: Id (agents), Ego (orchestrator+evaluator), Super-ego (Sky-Lynx+guardrails) |
-| Phase 5B | Planned | Embedded MCP server — CMD exposes tools (agents, missions, routing, schedules) via MCP on the same port. Zero extra setup for Claude Code users |
+| Phase 5 | Done | Planner-Worker-Judge — Sonnet mission planner, parallel worker pool (8-12 slots), two-layer quality judge, dimensional routing weights, subtask timeline UI |
+| Phase 5B | **Next** | Embedded MCP server — CMD exposes tools (agents, missions, routing, schedules) via MCP on the same port. Zero extra setup for Claude Code users |
 | Phase 6 | Planned | Peer collaboration — Metroplex A2A integration, async priority queue, health monitoring |
 | Phase 7 | Planned | Tier 4 ClaudeClaw agents — framework-coupled agents in ClaudeClaw runtime |
 
@@ -283,9 +299,12 @@ command-center/
 ├── server/                 # Backend — orchestrator, routes, DB, loaders
 │   ├── index.ts            # Express app entry point
 │   ├── orchestrator.ts     # Mission lifecycle, capability-aware routing, gap detection
+│   ├── planner.ts          # Sonnet mission decomposition into subtasks
+│   ├── worker-manager.ts   # Parallel worker pool, subtask scheduling, worktree isolation
+│   ├── judge.ts            # Two-layer quality evaluation (algorithmic + LLM)
 │   ├── scheduler.ts        # Interval-based mission scheduler
 │   ├── routes.ts           # API routes
-│   ├── db.ts               # SQLite schema + queries + capability registry
+│   ├── db.ts               # SQLite schema + queries + capability registry + worker pool
 │   ├── seed.ts             # Default agent registration
 │   ├── stock-loader.ts     # Stock agent discovery from repos
 │   └── custom-agents.ts    # Custom agent CRUD

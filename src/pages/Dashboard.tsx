@@ -32,6 +32,14 @@ interface ChatMessage {
   content: string;
 }
 
+interface WorkerPool {
+  active: number;
+  available: number;
+  maxWorkers: number;
+  burstLimit: number;
+  queueLength: number;
+}
+
 export function Dashboard() {
   const [missions, setMissions] = useState<Mission[]>([]);
   const [goal, setGoal] = useState('');
@@ -42,10 +50,12 @@ export function Dashboard() {
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const [chatLoading, setChatLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [pool, setPool] = useState<WorkerPool | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
   const loadMissions = useCallback(() => {
     api.listMissions().then((data) => setMissions(data.missions as Mission[]));
+    api.getWorkerPool().then((data) => setPool(data.pool as WorkerPool)).catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -283,6 +293,35 @@ export function Dashboard() {
           </div>
         )}
       </div>
+
+      {/* Worker Pool Status */}
+      {pool && (
+        <div className="mb-6 flex items-center gap-4 px-4 py-2.5 bg-gray-900 border border-gray-800 rounded-lg">
+          <span className="text-xs text-gray-500 uppercase tracking-wider font-semibold">Workers</span>
+          <div className="flex items-center gap-1.5">
+            {Array.from({ length: pool.burstLimit }, (_, i) => (
+              <div
+                key={i}
+                className={`w-2 h-4 rounded-sm transition-colors ${
+                  i < pool.active ? 'bg-yellow-500' :
+                  i < pool.maxWorkers ? 'bg-gray-700' : 'bg-gray-800'
+                }`}
+                title={
+                  i < pool.active ? 'Active' :
+                  i < pool.maxWorkers ? 'Available' : 'Burst'
+                }
+              />
+            ))}
+          </div>
+          <span className="text-xs text-gray-400">
+            {pool.active}/{pool.maxWorkers}
+            {pool.active > pool.maxWorkers && ` (burst ${pool.active}/${pool.burstLimit})`}
+          </span>
+          {pool.queueLength > 0 && (
+            <span className="text-xs text-yellow-400">{pool.queueLength} queued</span>
+          )}
+        </div>
+      )}
 
       {/* Active Missions */}
       {active.length > 0 && (
