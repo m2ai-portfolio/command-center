@@ -43,4 +43,24 @@ export function seedDefaultAgents(): void {
     'named'
   );
   registerA2AAgent('content', 'http://localhost:3145');
+
+  // Data — Chief of Staff, A2A enabled, dispatches to other agents
+  upsertAgent(
+    'data',
+    'Data',
+    'Chief of Staff for ST Metro — dispatch layer, open-item queue, weekly digest',
+    ['dispatch', 'digest', 'open-items', 'cleanup', 'cos'],
+    'named'
+  );
+  registerA2AAgent('data', 'http://localhost:3146');
+
+  // Kup — Engineering grunt, A2A enabled, can spawn sub-agents
+  upsertAgent(
+    'kup',
+    'Kup',
+    'Engineering grunt for ST Metro — infra maintenance, pattern porting, postmortem drafting',
+    ['engineering', 'infrastructure', 'porting', 'postmortem', 'maintenance'],
+    'named'
+  );
+  registerA2AAgent('kup', 'http://localhost:3147');
 }
