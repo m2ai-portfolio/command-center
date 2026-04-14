@@ -126,6 +126,32 @@ export const DEFAULT_POOL_CONFIG: WorkerPoolConfig = {
   contextDir: '/tmp',
 };
 
+// ── Mission Task Types (R2.1 — async queue for fire-and-forget dispatch) ──
+
+export type MissionTaskStatus = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
+
+export interface MissionTask {
+  id: string;
+  agent_id: string;
+  title: string;
+  prompt: string;
+  priority: number;            // 0-10, default 5
+  status: MissionTaskStatus;
+  result: string | null;
+  error: string | null;
+  created_at: number;
+  claimed_at: number | null;   // when dispatched to A2A
+  completed_at: number | null;
+  a2a_task_id: string | null;  // id returned by agent's A2A endpoint
+}
+
+export interface CreateMissionTaskRequest {
+  agent_id: string;
+  title: string;
+  prompt: string;
+  priority?: number;
+}
+
 // ── API Types ────────────────────────────────────────────────────────
 
 export interface CreateMissionRequest {

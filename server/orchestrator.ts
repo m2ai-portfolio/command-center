@@ -35,6 +35,11 @@ export function registerA2AAgent(agentId: string, endpoint: string): void {
   a2aEndpoints.set(agentId, endpoint);
 }
 
+/** Get the A2A endpoint URL for an agent, or undefined if not registered. */
+export function getA2AEndpoint(agentId: string): string | undefined {
+  return a2aEndpoints.get(agentId);
+}
+
 /** Try to discover an agent's A2A card. Returns true if successful. */
 export async function discoverAgent(endpoint: string): Promise<boolean> {
   try {

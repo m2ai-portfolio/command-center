@@ -14,7 +14,13 @@ import {
   listSchedules,
   updateSchedule,
   deleteSchedule,
+  createMissionTask,
+  getMissionTask,
+  listMissionTasks,
+  updateMissionTask,
 } from './db.js';
+import { dispatchMissionTask } from './mission-dispatcher.js';
+import type { CreateMissionTaskRequest } from '../shared/types.js';
 import { nextRunFromInterval } from './scheduler.js';
 import { chatWithData } from './chat.js';
 import {
@@ -376,6 +382,66 @@ router.get('/routing/insights', (_req, res) => {
     learning_active: weights.some(w => w.total_missions >= 3),
     judge_active: weights.some(w => w.correctness_avg != null),
   });
+});
+
+// ── Mission Tasks (R2.1 — async fire-and-forget queue) ────────────────
+
+router.post('/tasks', async (req, res) => {
+  const { agent_id, title, prompt, priority } = req.body as CreateMissionTaskRequest;
+  if (!agent_id?.trim()) {
+    res.status(400).json({ error: 'agent_id is required' });
+    return;
+  }
+  if (!title?.trim()) {
+    res.status(400).json({ error: 'title is required' });
+    return;
+  }
+  if (!prompt?.trim()) {
+    res.status(400).json({ error: 'prompt is required' });
+    return;
+  }
+  const id = uuidv4();
+  const task = createMissionTask({
+    id,
+    agent_id: agent_id.trim(),
+    title: title.trim(),
+    prompt: prompt.trim(),
+    priority,
+  });
+  // Fire-and-forget dispatch — returns immediately with queued task
+  dispatchMissionTask(id).catch(err => console.error(`[tasks] dispatch error for ${id}:`, err));
+  res.status(201).json({ task });
+});
+
+router.get('/tasks', (_req, res) => {
+  const tasks = listMissionTasks();
+  res.json({ tasks });
+});
+
+router.get('/tasks/:id', (req, res) => {
+  const task = getMissionTask(req.params.id);
+  if (!task) {
+    res.status(404).json({ error: 'Task not found' });
+    return;
+  }
+  res.json({ task });
+});
+
+router.post('/tasks/:id/cancel', (req, res) => {
+  const task = getMissionTask(req.params.id);
+  if (!task) {
+    res.status(404).json({ error: 'Task not found' });
+    return;
+  }
+  if (task.status !== 'queued' && task.status !== 'running') {
+    res.status(400).json({ error: `Cannot cancel task in status: ${task.status}` });
+    return;
+  }
+  updateMissionTask(req.params.id, {
+    status: 'cancelled',
+    completed_at: Math.floor(Date.now() / 1000),
+  });
+  res.json({ message: 'Task cancelled', task_id: req.params.id });
 });
 
 // ── Worker Pool (Phase 5.2) ──────────────────────────────────────────

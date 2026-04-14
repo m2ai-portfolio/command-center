@@ -106,6 +106,24 @@ export function initDatabase(): Database.Database {
     CREATE INDEX IF NOT EXISTS idx_mission_logs_mission ON mission_logs(mission_id);
     CREATE INDEX IF NOT EXISTS idx_agents_status ON agents(status);
     CREATE INDEX IF NOT EXISTS idx_outcome_logs_agent ON outcome_logs(agent_id);
+
+    -- R2.1: async fire-and-forget task queue for mission-cli/cron/hook dispatch
+    CREATE TABLE IF NOT EXISTS mission_tasks (
+      id TEXT PRIMARY KEY,
+      agent_id TEXT NOT NULL REFERENCES agents(id),
+      title TEXT NOT NULL,
+      prompt TEXT NOT NULL,
+      priority INTEGER NOT NULL DEFAULT 5,
+      status TEXT NOT NULL DEFAULT 'queued',
+      result TEXT,
+      error TEXT,
+      created_at INTEGER NOT NULL,
+      claimed_at INTEGER,
+      completed_at INTEGER,
+      a2a_task_id TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_mission_tasks_agent_status ON mission_tasks(agent_id, status);
+    CREATE INDEX IF NOT EXISTS idx_mission_tasks_created ON mission_tasks(created_at);
   `);
 
   // Phase 5 schema migrations — add quality scoring columns
@@ -637,6 +655,71 @@ export function updateMissionSubtask(
 }
 
 // ── Outcome Logging ──────────────────────────────────────────────────
+
+// ── Mission Tasks (R2.1 — async fire-and-forget queue) ────────────────
+
+import type { MissionTask, MissionTaskStatus } from '../shared/types.js';
+
+function mapMissionTaskRow(row: Record<string, unknown>): MissionTask {
+  return {
+    id: row.id as string,
+    agent_id: row.agent_id as string,
+    title: row.title as string,
+    prompt: row.prompt as string,
+    priority: row.priority as number,
+    status: row.status as MissionTaskStatus,
+    result: row.result as string | null,
+    error: row.error as string | null,
+    created_at: row.created_at as number,
+    claimed_at: row.claimed_at as number | null,
+    completed_at: row.completed_at as number | null,
+    a2a_task_id: row.a2a_task_id as string | null,
+  };
+}
+
+export function createMissionTask(task: {
+  id: string;
+  agent_id: string;
+  title: string;
+  prompt: string;
+  priority?: number;
+}): MissionTask {
+  const now = Math.floor(Date.now() / 1000);
+  getDb().prepare(
+    `INSERT INTO mission_tasks (id, agent_id, title, prompt, priority, status, created_at) VALUES (?, ?, ?, ?, ?, 'queued', ?)`
+  ).run(task.id, task.agent_id, task.title, task.prompt, task.priority ?? 5, now);
+  return getMissionTask(task.id)!;
+}
+
+export function getMissionTask(id: string): MissionTask | null {
+  const row = getDb().prepare('SELECT * FROM mission_tasks WHERE id = ?').get(id) as Record<string, unknown> | undefined;
+  return row ? mapMissionTaskRow(row) : null;
+}
+
+export function listMissionTasks(limit = 50): MissionTask[] {
+  const rows = getDb().prepare('SELECT * FROM mission_tasks ORDER BY created_at DESC LIMIT ?').all(limit) as Array<Record<string, unknown>>;
+  return rows.map(mapMissionTaskRow);
+}
+
+export function listMissionTasksByStatus(status: MissionTaskStatus): MissionTask[] {
+  const rows = getDb().prepare('SELECT * FROM mission_tasks WHERE status = ? ORDER BY created_at ASC').all(status) as Array<Record<string, unknown>>;
+  return rows.map(mapMissionTaskRow);
+}
+
+export function updateMissionTask(id: string, updates: Partial<{
+  status: MissionTaskStatus;
+  result: string | null;
+  error: string | null;
+  claimed_at: number | null;
+  completed_at: number | null;
+  a2a_task_id: string | null;
+}>): void {
+  const fields = Object.entries(updates).filter(([, v]) => v !== undefined);
+  if (fields.length === 0) return;
+  const sets = fields.map(([k]) => `${k} = ?`).join(', ');
+  const values = fields.map(([, v]) => v as string | number | null);
+  getDb().prepare(`UPDATE mission_tasks SET ${sets} WHERE id = ?`).run(...values, id);
+}
 
 export function getOutcomeStats() {
   const rows = getDb().prepare(`
