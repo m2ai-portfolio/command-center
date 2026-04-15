@@ -57,6 +57,29 @@ export const api = {
   // Routing insights
   getRoutingInsights: () => fetchJson<unknown>('/routing/insights'),
 
+  // Triggers (026)
+  listTriggers: () => fetchJson<{ triggers: unknown[] }>('/triggers'),
+  getTrigger: (id: string) => fetchJson<{ trigger: unknown }>(`/triggers/${id}`),
+  createTrigger: (data: {
+    name: string;
+    condition_type: string;
+    condition_config: Record<string, unknown>;
+    action_type: string;
+    action_config: Record<string, unknown>;
+    cooldown_seconds?: number;
+  }) => fetchJson<{ trigger: unknown }>('/triggers', { method: 'POST', body: JSON.stringify(data) }),
+  updateTrigger: (id: string, data: {
+    name?: string;
+    enabled?: boolean;
+    condition_config?: Record<string, unknown>;
+    action_config?: Record<string, unknown>;
+    cooldown_seconds?: number;
+  }) => fetchJson<{ trigger: unknown }>(`/triggers/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+  deleteTrigger: (id: string) =>
+    fetchJson<{ ok: boolean }>(`/triggers/${id}`, { method: 'DELETE' }),
+  listTriggerFires: (id: string, limit = 20) =>
+    fetchJson<{ fires: unknown[] }>(`/triggers/${id}/fires?limit=${limit}`),
+
   // Stock agents
   listStockAgents: () => fetchJson<{ total: number; categories: string[]; agents: unknown[] }>('/stock-agents'),
   syncStockRepos: () => fetchJson<{ message: string }>('/stock-agents/sync', { method: 'POST' }),

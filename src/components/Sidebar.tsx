@@ -86,6 +86,15 @@ export function Sidebar() {
           Schedules
         </Link>
 
+        <Link
+          to="/triggers"
+          className={`block px-3 py-2 rounded text-sm mt-1 ${
+            location.pathname === '/triggers' ? 'bg-gray-800 text-white' : 'text-gray-400 hover:text-white hover:bg-gray-800'
+          }`}
+        >
+          Triggers
+        </Link>
+
         <div className="mt-4 pt-4 border-t border-gray-800">
           <p className="text-xs text-gray-600 uppercase tracking-wider mb-2 px-3">Pipeline</p>
           <Link

@@ -5,6 +5,7 @@ import { CustomAgents } from './pages/CustomAgents';
 import { StockAgents } from './pages/StockAgents';
 import { NamedAgents } from './pages/NamedAgents';
 import { Schedules } from './pages/Schedules';
+import { Triggers } from './pages/Triggers';
 import { AITown } from './pages/AITown';
 import { StMetro } from './pages/StMetro';
 import { SkyLynx } from './pages/SkyLynx';
@@ -22,6 +23,7 @@ export function App() {
           <Route path="/custom-agents" element={<CustomAgents />} />
           <Route path="/stock-agents" element={<StockAgents />} />
           <Route path="/schedules" element={<Schedules />} />
+          <Route path="/triggers" element={<Triggers />} />
           <Route path="/ai-town" element={<AITown />} />
           <Route path="/st-metro" element={<StMetro />} />
           <Route path="/sky-lynx" element={<SkyLynx />} />
