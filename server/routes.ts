@@ -21,7 +21,7 @@ import {
 } from './db.js';
 import { dispatchMissionTask } from './mission-dispatcher.js';
 import type { CreateMissionTaskRequest } from '../shared/types.js';
-import { nextRunFromInterval } from './scheduler.js';
+import { nextRunFromInterval, runScheduleNow } from './scheduler.js';
 import { chatWithData } from './chat.js';
 import {
   proposeMission,
@@ -506,4 +506,21 @@ router.delete('/schedules/:id', (req, res) => {
     return;
   }
   res.json({ message: 'Schedule deleted' });
+});
+
+router.post('/schedules/:id/run', async (req, res) => {
+  const schedule = listSchedules().find(s => s.id === req.params.id);
+  if (!schedule) {
+    res.status(404).json({ error: 'Schedule not found' });
+    return;
+  }
+  try {
+    const missionId = await runScheduleNow(schedule.goal);
+    const now = Math.floor(Date.now() / 1000);
+    updateSchedule(schedule.id, { last_run_at: now, last_mission_id: missionId });
+    res.json({ message: 'Mission created', mission_id: missionId });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ error: msg });
+  }
 });

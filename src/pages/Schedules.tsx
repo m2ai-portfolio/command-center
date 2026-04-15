@@ -28,6 +28,7 @@ export function Schedules() {
   const [interval, setInterval_] = useState('1h');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [running, setRunning] = useState<Record<string, boolean>>({});
 
   const load = useCallback(() => {
     api.listSchedules().then(data => setSchedules(data.schedules as Schedule[]));
@@ -65,6 +66,21 @@ export function Schedules() {
     if (!confirm('Delete this schedule?')) return;
     await api.deleteSchedule(id);
     load();
+  };
+
+  const handleRunNow = async (id: string) => {
+    setRunning(prev => ({ ...prev, [id]: true }));
+    try {
+      const res = await fetch(`/api/schedules/${id}/run`, { method: 'POST' });
+      const data = await res.json() as { mission_id?: string; error?: string };
+      if (!res.ok) throw new Error(data.error || res.statusText);
+      setError(null);
+      load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setRunning(prev => ({ ...prev, [id]: false }));
+    }
   };
 
   const formatTime = (ts: number | null) => {
@@ -187,6 +203,13 @@ export function Schedules() {
                   </div>
                 </div>
                 <div className="flex gap-2 shrink-0">
+                  <button
+                    onClick={() => handleRunNow(s.id)}
+                    disabled={running[s.id]}
+                    className="px-3 py-1.5 text-sm bg-gray-800 hover:bg-blue-900 text-gray-400 hover:text-blue-300 disabled:opacity-50 rounded transition-colors"
+                  >
+                    {running[s.id] ? 'Running...' : 'Run Now'}
+                  </button>
                   <button
                     onClick={() => handleToggle(s.id, s.enabled)}
                     className={`px-3 py-1.5 text-sm rounded transition-colors ${

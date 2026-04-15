@@ -32,6 +32,19 @@ export function nextRunFromInterval(interval: string, fromMs = Date.now()): numb
   return Math.floor((fromMs + ms) / 1000);
 }
 
+/**
+ * Create and immediately auto-approve a mission for the given goal.
+ * Does NOT touch next_run_at -- callers decide what to update in the DB.
+ * Returns the created mission id.
+ */
+export async function runScheduleNow(goal: string): Promise<string> {
+  const { mission } = await proposeMission(goal);
+  approveMission(mission.id).catch(err => {
+    console.error(`[Scheduler] run-now mission ${mission.id} execution error:`, err);
+  });
+  return mission.id;
+}
+
 /** Check all schedules and fire any that are due */
 async function tick(): Promise<void> {
   const now = Math.floor(Date.now() / 1000);
@@ -44,11 +57,7 @@ async function tick(): Promise<void> {
     try {
       console.log(`[Scheduler] Firing schedule "${schedule.id}": ${schedule.goal}`);
 
-      // Create and auto-approve the mission
-      const { mission } = await proposeMission(schedule.goal);
-      approveMission(mission.id).catch(err => {
-        console.error(`[Scheduler] Mission ${mission.id} execution error:`, err);
-      });
+      const missionId = await runScheduleNow(schedule.goal);
 
       // Calculate next run
       const nextRun = nextRunFromInterval(schedule.cron);
@@ -56,7 +65,7 @@ async function tick(): Promise<void> {
       updateSchedule(schedule.id, {
         last_run_at: now,
         next_run_at: nextRun ?? undefined,
-        last_mission_id: mission.id,
+        last_mission_id: missionId,
       });
 
       // Disable if we can't calculate next run (bad interval)
