@@ -87,6 +87,18 @@ export function Sidebar() {
         </Link>
 
         <div className="mt-4 pt-4 border-t border-gray-800">
+          <p className="text-xs text-gray-600 uppercase tracking-wider mb-2 px-3">Pipeline</p>
+          <Link
+            to="/st-metro"
+            className={`block px-3 py-2 rounded text-sm ${
+              location.pathname === '/st-metro' ? 'bg-gray-800 text-white' : 'text-gray-400 hover:text-white hover:bg-gray-800'
+            }`}
+          >
+            ST Metro
+          </Link>
+        </div>
+
+        <div className="mt-4 pt-4 border-t border-gray-800">
           <p className="text-xs text-gray-600 uppercase tracking-wider mb-2 px-3">Fun</p>
           <Link
             to="/ai-town"

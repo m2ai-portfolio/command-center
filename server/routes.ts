@@ -1,5 +1,7 @@
 import { Router } from 'express';
 import { v4 as uuidv4 } from 'uuid';
+import Database from 'better-sqlite3';
+import path from 'path';
 import {
   getMission,
   listMissions,
@@ -522,5 +524,82 @@ router.post('/schedules/:id/run', async (req, res) => {
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     res.status(500).json({ error: msg });
+  }
+});
+
+// ── ST Metro: IdeaForge pipeline state ───────────────────────────────────────
+
+const IDEAFORGE_DB_PATH =
+  process.env.IDEAFORGE_DB_PATH ??
+  '/home/apexaipc/projects/ideaforge/data/ideaforge.db';
+
+interface StageRow { status: string; cnt: number }
+interface IdeaRow { id: number; title: string; weighted_score: number | null; status: string }
+
+router.get('/st-metro/ideaforge', (_req, res) => {
+  let ifDb: Database.Database | null = null;
+  try {
+    ifDb = new Database(IDEAFORGE_DB_PATH, { readonly: true });
+
+    const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000)
+      .toISOString()
+      .replace('T', ' ')
+      .slice(0, 19);
+
+    const signals_last_7d = (
+      ifDb
+        .prepare("SELECT COUNT(*) AS cnt FROM signals WHERE harvested_at >= ?")
+        .get(sevenDaysAgo) as { cnt: number }
+    ).cnt;
+
+    const stage_breakdown = (
+      ifDb.prepare("SELECT status, COUNT(*) AS cnt FROM ideas GROUP BY status").all() as StageRow[]
+    ).map((r) => ({ status: r.status, count: r.cnt }));
+
+    const total_ideas = stage_breakdown.reduce((s, r) => s + r.count, 0);
+    const built_count =
+      stage_breakdown.find((r) => r.status === 'built')?.count ?? 0;
+
+    const top_ideas = ifDb
+      .prepare(
+        `SELECT id, title, weighted_score, status
+         FROM ideas
+         WHERE weighted_score IS NOT NULL
+         ORDER BY weighted_score DESC
+         LIMIT 10`
+      )
+      .all() as IdeaRow[];
+
+    const anomaly_count = (
+      ifDb
+        .prepare(
+          `SELECT COUNT(*) AS cnt FROM ideas
+           WHERE status = 'unscored'
+             AND synthesized_at <= datetime('now', '-3 days')`
+        )
+        .get() as { cnt: number }
+    ).cnt;
+
+    res.json({
+      signals_last_7d,
+      total_ideas,
+      built_count,
+      stage_breakdown,
+      top_ideas,
+      anomaly_count,
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.json({
+      warning: `Could not open IdeaForge DB: ${msg}`,
+      signals_last_7d: 0,
+      total_ideas: 0,
+      built_count: 0,
+      stage_breakdown: [],
+      top_ideas: [],
+      anomaly_count: 0,
+    });
+  } finally {
+    ifDb?.close();
   }
 });
