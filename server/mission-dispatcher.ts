@@ -1,5 +1,6 @@
 import {
   getMissionTask,
+  listMissionTasks,
   listMissionTasksByStatus,
   updateMissionTask,
   appendConversation,
@@ -9,6 +10,7 @@ import {
 import { getA2AEndpoint } from './orchestrator.js';
 import type { A2ATaskRequest, A2ATaskStatus } from '../shared/a2a.js';
 import { createWorktree, mergeWorktree, cleanupWorktree, isGitRepo } from './worktree-mt.js';
+import { touchAgentLock, releaseAgentLock, reconcileStaleLocks } from './agent-lock.js';
 import { triggerBus } from './trigger-bus.js';
 
 /** Format prior conversation as a context block for the agent's next task. */
@@ -63,6 +65,9 @@ export async function dispatchMissionTask(taskId: string): Promise<void> {
         worktree_path: ids.worktreePath,
         branch_name: ids.branchName,
       });
+      // 028 Phase 2: suppress WIP-snapshot cron on the source repo for the
+      // lifetime of this dispatch. Released on every terminal transition.
+      touchAgentLock(task.repo_path, task.id);
     } catch (err) {
       updateMissionTask(taskId, {
         status: 'failed',
@@ -95,6 +100,8 @@ export async function dispatchMissionTask(taskId: string): Promise<void> {
         error: `A2A dispatch failed (${res.status}): ${text.slice(0, 500)}`,
         completed_at: Math.floor(Date.now() / 1000),
       });
+      // 028 Phase 2: dispatch failed after lock was taken; release it.
+      if (task.repo_path) releaseAgentLock(task.repo_path, task.id);
       return;
     }
     const data = await res.json() as { task_id: string };
@@ -110,6 +117,8 @@ export async function dispatchMissionTask(taskId: string): Promise<void> {
       error: `A2A dispatch exception: ${msg.slice(0, 500)}`,
       completed_at: Math.floor(Date.now() / 1000),
     });
+    // 028 Phase 2: dispatch exception after lock was taken; release it.
+    if (task.repo_path) releaseAgentLock(task.repo_path, task.id);
   }
 }
 
@@ -132,6 +141,8 @@ async function pollRunningTasks(): Promise<void> {
           error: 'A2A task lost (agent restarted or task expired)',
           completed_at: Math.floor(Date.now() / 1000),
         });
+        // 028 Phase 2: release WIP-suppression lock on terminal state.
+        if (task.repo_path) releaseAgentLock(task.repo_path, task.id);
         continue;
       }
       if (!res.ok) continue;
@@ -168,6 +179,8 @@ async function pollRunningTasks(): Promise<void> {
           error: finalError,
           completed_at: Math.floor(Date.now() / 1000),
         });
+        // 028 Phase 2: release WIP-suppression lock on terminal state.
+        if (task.repo_path) releaseAgentLock(task.repo_path, task.id);
         // R2.3: persist the exchange so future tasks for this agent have context
         appendConversation(task.agent_id, 'user', task.prompt, task.id);
         appendConversation(task.agent_id, 'assistant', result, task.id);
@@ -192,6 +205,8 @@ async function pollRunningTasks(): Promise<void> {
           error: errMsg,
           completed_at: Math.floor(Date.now() / 1000),
         });
+        // 028 Phase 2: release WIP-suppression lock on terminal state.
+        if (task.repo_path) releaseAgentLock(task.repo_path, task.id);
         // 026: emit trigger event on A2A-reported failure
         triggerBus.emitEvent({
           type: 'mission_failed',
@@ -210,8 +225,29 @@ async function pollRunningTasks(): Promise<void> {
 
 let pollerHandle: NodeJS.Timeout | null = null;
 
+/**
+ * 028 Phase 2: on startup, remove stale `.cmd-agent-active/*` sentinels for
+ * tasks that are no longer `running`. A CMD crash mid-dispatch would otherwise
+ * leave a lock that starves the WIP-snapshot cron forever.
+ *
+ * Walks the last 200 mission tasks (not just the currently-running ones) so
+ * any repo CMD has recently touched gets its stale sentinels cleaned, even if
+ * the owning task crashed into `failed` or `completed` without releasing.
+ */
+function reconcileAgentLocksOnStartup(): void {
+  const liveIds = new Set(listMissionTasksByStatus('running').map(t => t.id));
+  const recentRepos = new Set<string>();
+  for (const t of listMissionTasks(200)) {
+    if (t.repo_path) recentRepos.add(t.repo_path);
+  }
+  for (const repo of recentRepos) {
+    reconcileStaleLocks(repo, liveIds);
+  }
+}
+
 export function startMissionDispatcher(): void {
   if (pollerHandle) return;
+  reconcileAgentLocksOnStartup();
   pollerHandle = setInterval(() => {
     pollRunningTasks().catch(err => console.error('[mission-dispatcher] poll error:', err));
   }, POLL_INTERVAL_MS);
