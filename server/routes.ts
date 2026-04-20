@@ -700,6 +700,24 @@ interface SkylynxJsonRec {
 }
 
 router.get('/sky-lynx/recs', (_req, res) => {
+  // Normalize parameter titles so recurring themes group together:
+  // strips leading numeric prefixes like "1.", "2)", "3 - ", lowercases,
+  // and collapses whitespace. "1. Lower Test Coverage" -> "lower test coverage".
+  function normalizeParam(s: string): string {
+    return s
+      .toLowerCase()
+      .replace(/^\s*\d+[.)\s-]+/, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  // A proposal is a "draft" (diagnosis without a fix) when proposed_value is
+  // null, empty, or whitespace-only. Drafts never resolve, so they naturally
+  // drop out of acceptance_rate (accepted / (accepted + rejected)).
+  function isDraft(p: SkylynxProposalRow): boolean {
+    return p.proposed_value == null || String(p.proposed_value).trim() === '';
+  }
+
   let db: Database.Database | null = null;
   try {
     // DB proposals (structured, have acceptance signal)
@@ -740,20 +758,29 @@ router.get('/sky-lynx/recs', (_req, res) => {
       // directory missing or unreadable — return empty list
     }
 
-    // Repeat count per parameter (signals recurring recommendations)
+    // Repeat count per normalized parameter (signals recurring recommendations)
     const repeats: Record<string, number> = {};
     for (const p of proposals) {
-      repeats[p.parameter] = (repeats[p.parameter] ?? 0) + 1;
+      const key = normalizeParam(p.parameter);
+      repeats[key] = (repeats[key] ?? 0) + 1;
     }
+
+    const draft_count = proposals.reduce((n, p) => n + (isDraft(p) ? 1 : 0), 0);
 
     res.json({
       proposal_count: proposals.length,
       status_counts: statusCounts,
       acceptance_rate,
-      proposals: proposals.map((p) => ({
-        ...p,
-        repeat_count: repeats[p.parameter] ?? 1,
-      })),
+      draft_count,
+      proposals: proposals.map((p) => {
+        const repeat_key = normalizeParam(p.parameter);
+        return {
+          ...p,
+          repeat_key,
+          repeat_count: repeats[repeat_key] ?? 1,
+          is_draft: isDraft(p),
+        };
+      }),
       json_recs: jsonRecs,
     });
   } catch (err) {
@@ -763,6 +790,7 @@ router.get('/sky-lynx/recs', (_req, res) => {
       proposal_count: 0,
       status_counts: {},
       acceptance_rate: null,
+      draft_count: 0,
       proposals: [],
       json_recs: [],
     });

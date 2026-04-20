@@ -12,6 +12,8 @@ interface Proposal {
   resolved_at: string | null;
   squawk_count: number;
   repeat_count: number;
+  repeat_key?: string;
+  is_draft?: boolean;
 }
 
 interface JsonRec {
@@ -30,6 +32,7 @@ interface SkyLynxData {
   proposal_count: number;
   status_counts: Record<string, number>;
   acceptance_rate: number | null;
+  draft_count?: number;
   proposals: Proposal[];
   json_recs: JsonRec[];
 }
@@ -38,6 +41,7 @@ const EMPTY: SkyLynxData = {
   proposal_count: 0,
   status_counts: {},
   acceptance_rate: null,
+  draft_count: 0,
   proposals: [],
   json_recs: [],
 };
@@ -109,10 +113,11 @@ export function SkyLynx() {
         </div>
       )}
 
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+      <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
         <KpiCard label="Proposals" value={data.proposal_count} />
         <KpiCard label="Accepted" value={data.status_counts.accepted ?? 0} accent="text-emerald-400" />
         <KpiCard label="Rejected" value={data.status_counts.rejected ?? 0} accent="text-red-400" />
+        <KpiCard label="Drafts" value={data.draft_count ?? 0} accent="text-amber-400" />
         <KpiCard label="Acceptance Rate" value={acceptancePct} accent="text-blue-400" />
       </div>
 
@@ -168,7 +173,21 @@ export function SkyLynx() {
             <tbody className="divide-y divide-gray-800">
               {filtered.map((p) => (
                 <tr key={p.id} className="hover:bg-gray-800/50" title={p.rationale}>
-                  <td className="py-2 pr-4 text-gray-200 font-mono text-xs">{p.parameter}</td>
+                  <td className="py-2 pr-4 text-gray-200 font-mono text-xs">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span>{p.parameter}</span>
+                      {p.is_draft && (
+                        <span className="px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider rounded-full bg-amber-900/50 text-amber-300 border border-amber-700/60">
+                          draft
+                        </span>
+                      )}
+                      {p.repeat_count > 1 && (
+                        <span className="px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider rounded-full bg-blue-900/50 text-blue-300 border border-blue-700/60">
+                          recurring
+                        </span>
+                      )}
+                    </div>
+                  </td>
                   <td className="py-2 pr-4 text-gray-400 font-mono text-xs">
                     {p.current_value} → <span className="text-blue-300">{p.proposed_value}</span>
                   </td>
