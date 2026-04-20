@@ -93,4 +93,26 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ category }),
     }),
+
+  // HiveMind (R3.b / 030)
+  listHivemindEvents: (opts: { agent?: string; type?: string; mission?: string; limit?: number } = {}) => {
+    const qs = new URLSearchParams();
+    if (opts.agent) qs.set('agent', opts.agent);
+    if (opts.type) qs.set('type', opts.type);
+    if (opts.mission) qs.set('mission', opts.mission);
+    if (opts.limit) qs.set('limit', String(opts.limit));
+    const suffix = qs.toString() ? `?${qs}` : '';
+    return fetchJson<{ events: HivemindEvent[] }>(`/hivemind${suffix}`);
+  },
 };
+
+export interface HivemindEvent {
+  id: number;
+  ts: number;
+  agent_id: string | null;
+  mission_id: string | null;
+  task_id: string | null;
+  event_type: string;
+  summary: string;
+  metadata: Record<string, unknown> | null;
+}

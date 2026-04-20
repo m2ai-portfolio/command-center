@@ -113,6 +113,14 @@ export function Sidebar() {
           >
             Sky-Lynx
           </Link>
+          <Link
+            to="/hivemind"
+            className={`block px-3 py-2 rounded text-sm mt-1 ${
+              location.pathname === '/hivemind' ? 'bg-gray-800 text-white' : 'text-gray-400 hover:text-white hover:bg-gray-800'
+            }`}
+          >
+            HiveMind
+          </Link>
         </div>
 
         <div className="mt-4 pt-4 border-t border-gray-800">

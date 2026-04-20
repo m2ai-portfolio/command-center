@@ -25,6 +25,7 @@ import { planMission } from './planner.js';
 import { judgeMission } from './judge.js';
 import { askReasoner, type ReasonerAttempt } from './reasoner.js';
 import { executeMission as executeViaWorkerManager } from './worker-manager.js';
+import { emitHivemind } from './hivemind.js';
 import type { Mission, MissionPlan, AgentCard, JudgeVerdict } from '../shared/types.js';
 import { DIMENSION_WEIGHTS, computeCompositeScore } from '../shared/types.js';
 import type { A2ATaskRequest, A2ATaskStatus } from '../shared/a2a.js';
@@ -301,6 +302,14 @@ export async function approveMission(missionId: string): Promise<void> {
   const agentId = (mission.agent_id as string) ?? 'stock-fallback';
   const subtaskCount = mission.plan?.subtasks?.length ?? 1;
 
+  emitHivemind({
+    event_type: 'mission_start',
+    agent_id: agentId,
+    mission_id: missionId,
+    summary: `Mission approved → ${agentId} (${subtaskCount} subtask${subtaskCount === 1 ? '' : 's'})`,
+    metadata: { subtaskCount, goal: (mission.goal as string).slice(0, 200) },
+  });
+
   // Phase 5.2: Multi-subtask missions route through Worker Manager
   if (subtaskCount > 1) {
     updateMission(missionId, { status: 'running' });
@@ -319,6 +328,13 @@ export async function approveMission(missionId: string): Promise<void> {
       const planReasoning = mission.plan?.reasoning ?? '';
       const taskType = inferTaskType(planReasoning, mission.goal as string);
       logOutcome(missionId, taskType, agentId, planReasoning, completed?.status as string ?? 'completed', durationMs);
+      emitHivemind({
+        event_type: 'mission_end',
+        agent_id: agentId,
+        mission_id: missionId,
+        summary: `Worker Manager finished in ${Math.round(durationMs / 1000)}s (status=${completed?.status ?? 'completed'})`,
+        metadata: { status: completed?.status, durationMs, via: 'worker-manager' },
+      });
       runJudgeAsync(missionId, mission.goal as string, completed?.result as string ?? '', taskType, agentId, completed?.status as string ?? 'completed', durationMs);
     } catch (err) {
       const durationMs = Date.now() - startTime;
@@ -329,6 +345,13 @@ export async function approveMission(missionId: string): Promise<void> {
       const planReasoning = mission.plan?.reasoning ?? '';
       const taskType = inferTaskType(planReasoning, mission.goal as string);
       logOutcome(missionId, taskType, agentId, planReasoning, 'failed', durationMs);
+      emitHivemind({
+        event_type: 'mission_end',
+        agent_id: agentId,
+        mission_id: missionId,
+        summary: `Worker Manager failed after ${Math.round(durationMs / 1000)}s: ${errMsg.slice(0, 120)}`,
+        metadata: { status: 'failed', durationMs, via: 'worker-manager' },
+      });
       runJudgeAsync(missionId, mission.goal as string, errMsg, taskType, agentId, 'failed', durationMs);
     }
     return;
@@ -371,6 +394,13 @@ export async function approveMission(missionId: string): Promise<void> {
       }
 
       const attemptStart = Date.now();
+      emitHivemind({
+        event_type: 'agent_dispatch',
+        agent_id: currentAgent,
+        mission_id: missionId,
+        summary: `Dispatching to ${currentAgent} (iter ${iteration}/${JUDGE_MAX_ITERATIONS})`,
+        metadata: { iteration, taskType },
+      });
       let attemptResult: string;
       let attemptFailed = false;
       try {
@@ -381,6 +411,15 @@ export async function approveMission(missionId: string): Promise<void> {
         addMissionLog(missionId, 'error', `Dispatch error iter ${iteration}: ${attemptResult.slice(0, 200)}`);
       }
       const attemptDurationMs = Date.now() - attemptStart;
+      emitHivemind({
+        event_type: attemptFailed ? 'agent_fail' : 'agent_complete',
+        agent_id: currentAgent,
+        mission_id: missionId,
+        summary: attemptFailed
+          ? `${currentAgent} dispatch failed: ${attemptResult.slice(0, 120)}`
+          : `${currentAgent} completed iter ${iteration} in ${Math.round(attemptDurationMs / 1000)}s`,
+        metadata: { iteration, durationMs: attemptDurationMs },
+      });
       finalResult = attemptResult;
       finalStatus = attemptFailed ? 'failed' : 'completed';
 
@@ -397,6 +436,18 @@ export async function approveMission(missionId: string): Promise<void> {
         `r:${(verdict.quality_scores.relevance * 100).toFixed(0)}%) ` +
         `[${verdict.method}]`
       );
+      emitHivemind({
+        event_type: 'judge_verdict',
+        agent_id: currentAgent,
+        mission_id: missionId,
+        summary: `Judge iter ${iteration}: ${verdict.passed ? 'PASS' : 'FAIL'} (composite ${(verdict.composite_score * 100).toFixed(0)}%)`,
+        metadata: {
+          iteration,
+          passed: verdict.passed,
+          composite: verdict.composite_score,
+          method: verdict.method,
+        },
+      });
 
       updateOutcomeScores(missionId, {
         correctness: verdict.quality_scores.correctness,
@@ -449,6 +500,18 @@ export async function approveMission(missionId: string): Promise<void> {
         (decision.new_agent_id ? ` → ${decision.new_agent_id}` : '') +
         ` — ${decision.rationale}`
       );
+      emitHivemind({
+        event_type: 'reasoner_action',
+        agent_id: currentAgent,
+        mission_id: missionId,
+        summary: `Reasoner: ${decision.action}${decision.new_agent_id ? ` → ${decision.new_agent_id}` : ''}`,
+        metadata: {
+          iteration,
+          action: decision.action,
+          next_agent_id: decision.new_agent_id,
+          rationale: decision.rationale.slice(0, 200),
+        },
+      });
       recordJudgeIteration({
         mission_id: missionId, iteration, agent_id: currentAgent,
         verdict, reasoner_action: decision.action,
@@ -482,6 +545,17 @@ export async function approveMission(missionId: string): Promise<void> {
       `Mission ${finalAction} after ${Math.round(totalDurationMs / 1000)}s ` +
       `(${priorAttempts.length + 1} attempt${priorAttempts.length ? 's' : ''})`
     );
+    emitHivemind({
+      event_type: 'mission_end',
+      agent_id: currentAgent,
+      mission_id: missionId,
+      summary: `Mission ${finalAction} after ${Math.round(totalDurationMs / 1000)}s (${priorAttempts.length + 1} attempt${priorAttempts.length ? 's' : ''})`,
+      metadata: {
+        finalAction,
+        attempts: priorAttempts.length + 1,
+        durationMs: totalDurationMs,
+      },
+    });
     setMissionJudgeFinalAction(missionId, finalAction);
     if (finalVerdict) setMissionJudgeVerdict(missionId, finalVerdict);
   } finally {

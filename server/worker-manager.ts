@@ -16,6 +16,7 @@ import {
 import { getStockAgentPrompt } from './stock-loader.js';
 import { getCustomAgentPrompt } from './custom-agents.js';
 import { resolveConflict } from './conflict-resolver.js';
+import { emitHivemind } from './hivemind.js';
 import type { MissionSubtask, WorkerPoolConfig } from '../shared/types.js';
 import { DEFAULT_POOL_CONFIG } from '../shared/types.js';
 
@@ -362,6 +363,14 @@ export async function executeMission(missionId: string): Promise<void> {
       }
 
       updateMissionSubtask(missionId, subtask.id, { status: 'running' });
+      emitHivemind({
+        event_type: 'subtask_start',
+        agent_id: subtask.agent_id,
+        mission_id: missionId,
+        task_id: subtask.id,
+        summary: `Subtask ${subtaskIndex + 1}/${totalSubtasks} started on ${subtask.agent_id}: ${subtask.description.slice(0, 100)}`,
+        metadata: { subtaskIndex, totalSubtasks, slotId },
+      });
 
       // Dispatch worker (async, don't block the loop)
       dispatches.push(
@@ -441,6 +450,14 @@ async function runSubtaskWithRetry(
     appendSubtaskResult(missionId, subtask.id, subtask.description, result);
     addMissionLog(missionId, 'info',
       `Subtask ${subtaskIndex + 1} completed in ${Math.round(durationMs / 1000)}s`);
+    emitHivemind({
+      event_type: 'subtask_complete',
+      agent_id: subtask.agent_id,
+      mission_id: missionId,
+      task_id: subtask.id,
+      summary: `Subtask ${subtaskIndex + 1}/${totalSubtasks} completed in ${Math.round(durationMs / 1000)}s`,
+      metadata: { subtaskIndex, durationMs, retried: false },
+    });
   } catch (err) {
     const errMsg = err instanceof Error ? err.message : String(err);
 
@@ -460,6 +477,14 @@ async function runSubtaskWithRetry(
       appendSubtaskResult(missionId, subtask.id, subtask.description, result);
       addMissionLog(missionId, 'info',
         `Subtask ${subtaskIndex + 1} completed on retry in ${Math.round(durationMs / 1000)}s`);
+      emitHivemind({
+        event_type: 'subtask_complete',
+        agent_id: subtask.agent_id,
+        mission_id: missionId,
+        task_id: subtask.id,
+        summary: `Subtask ${subtaskIndex + 1}/${totalSubtasks} completed on retry in ${Math.round(durationMs / 1000)}s`,
+        metadata: { subtaskIndex, durationMs, retried: true },
+      });
     } catch (retryErr) {
       const retryMsg = retryErr instanceof Error ? retryErr.message : String(retryErr);
       updateMissionSubtask(missionId, subtask.id, {
@@ -468,6 +493,14 @@ async function runSubtaskWithRetry(
       });
       addMissionLog(missionId, 'error',
         `Subtask ${subtaskIndex + 1} failed after retry: ${retryMsg.slice(0, 200)}`);
+      emitHivemind({
+        event_type: 'agent_fail',
+        agent_id: subtask.agent_id,
+        mission_id: missionId,
+        task_id: subtask.id,
+        summary: `Subtask ${subtaskIndex + 1}/${totalSubtasks} failed after retry: ${retryMsg.slice(0, 120)}`,
+        metadata: { subtaskIndex, retried: true },
+      });
     }
   } finally {
     releaseWorkerSlot(slotId);

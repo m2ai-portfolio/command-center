@@ -28,6 +28,7 @@ import {
   deleteTrigger,
   listTriggerFires,
   listMissionJudgeHistory,
+  listHivemindEvents,
   type TriggerConditionType,
   type TriggerActionType,
 } from './db.js';
@@ -897,4 +898,32 @@ router.get('/triggers/:id/fires', (req, res) => {
   }
   const limit = Math.min(parseInt(String(req.query.limit ?? '20'), 10) || 20, 200);
   res.json({ fires: listTriggerFires(req.params.id, limit) });
+});
+
+// ── HiveMind ───────────────────────────────────────────────────────
+// R3.b (030): cross-agent, cross-mission activity log. Read-only in v1.
+
+router.get('/hivemind', (req, res) => {
+  const agentId = typeof req.query.agent === 'string' && req.query.agent.trim()
+    ? req.query.agent.trim()
+    : undefined;
+  const eventType = typeof req.query.type === 'string' && req.query.type.trim()
+    ? req.query.type.trim()
+    : undefined;
+  const missionId = typeof req.query.mission === 'string' && req.query.mission.trim()
+    ? req.query.mission.trim()
+    : undefined;
+  const since = req.query.since ? parseInt(String(req.query.since), 10) : undefined;
+  const limit = Math.min(
+    Math.max(parseInt(String(req.query.limit ?? '100'), 10) || 100, 1),
+    1000,
+  );
+  const events = listHivemindEvents({
+    agentId,
+    eventType,
+    missionId,
+    since: Number.isFinite(since) ? since : undefined,
+    limit,
+  });
+  res.json({ events });
 });

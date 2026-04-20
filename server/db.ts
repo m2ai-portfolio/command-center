@@ -217,6 +217,23 @@ export function initDatabase(): Database.Database {
       ON mission_judge_history(mission_id, iteration);
   `);
 
+  // R3.b (030): HiveMind cross-agent activity log
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS hivemind_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      ts INTEGER NOT NULL,
+      agent_id TEXT,
+      mission_id TEXT,
+      task_id TEXT,
+      event_type TEXT NOT NULL,
+      summary TEXT NOT NULL,
+      metadata TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_hivemind_ts ON hivemind_events(ts DESC);
+    CREATE INDEX IF NOT EXISTS idx_hivemind_agent_ts ON hivemind_events(agent_id, ts DESC);
+    CREATE INDEX IF NOT EXISTS idx_hivemind_type_ts ON hivemind_events(event_type, ts DESC);
+  `);
+
   // Phase 5.2: Worker pool persistence
   db.exec(`
     CREATE TABLE IF NOT EXISTS worker_slots (
@@ -647,6 +664,70 @@ export function listMissionJudgeHistory(missionId: string): JudgeHistoryRow[] {
      FROM mission_judge_history WHERE mission_id = ? ORDER BY iteration ASC`
   ).all(missionId) as Array<Omit<JudgeHistoryRow, 'verdict'> & { verdict: string }>;
   return rows.map(r => ({ ...r, verdict: JSON.parse(r.verdict) }));
+}
+
+// ── HiveMind: cross-agent activity log ──────────────────────────────
+
+export interface HivemindEvent {
+  id: number;
+  ts: number;
+  agent_id: string | null;
+  mission_id: string | null;
+  task_id: string | null;
+  event_type: string;
+  summary: string;
+  metadata: Record<string, unknown> | null;
+}
+
+export interface HivemindEventInput {
+  agent_id?: string | null;
+  mission_id?: string | null;
+  task_id?: string | null;
+  event_type: string;
+  summary: string;
+  metadata?: Record<string, unknown> | null;
+}
+
+export function insertHivemindEvent(e: HivemindEventInput): void {
+  const now = Math.floor(Date.now() / 1000);
+  getDb().prepare(
+    `INSERT INTO hivemind_events
+      (ts, agent_id, mission_id, task_id, event_type, summary, metadata)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`
+  ).run(
+    now,
+    e.agent_id ?? null,
+    e.mission_id ?? null,
+    e.task_id ?? null,
+    e.event_type,
+    e.summary,
+    e.metadata ? JSON.stringify(e.metadata) : null,
+  );
+}
+
+export function listHivemindEvents(opts: {
+  agentId?: string;
+  eventType?: string;
+  missionId?: string;
+  since?: number;
+  limit?: number;
+} = {}): HivemindEvent[] {
+  const limit = Math.min(Math.max(opts.limit ?? 100, 1), 1000);
+  const clauses: string[] = [];
+  const params: Array<string | number> = [];
+  if (opts.agentId) { clauses.push('agent_id = ?'); params.push(opts.agentId); }
+  if (opts.eventType) { clauses.push('event_type = ?'); params.push(opts.eventType); }
+  if (opts.missionId) { clauses.push('mission_id = ?'); params.push(opts.missionId); }
+  if (opts.since) { clauses.push('ts >= ?'); params.push(opts.since); }
+  const where = clauses.length ? 'WHERE ' + clauses.join(' AND ') : '';
+  const rows = getDb().prepare(
+    `SELECT id, ts, agent_id, mission_id, task_id, event_type, summary, metadata
+     FROM hivemind_events ${where} ORDER BY ts DESC, id DESC LIMIT ?`
+  ).all(...params, limit) as Array<Omit<HivemindEvent, 'metadata'> & { metadata: string | null }>;
+  return rows.map(r => ({
+    ...r,
+    metadata: r.metadata ? (JSON.parse(r.metadata) as Record<string, unknown>) : null,
+  }));
 }
 
 // ── Schedules ───────────────────────────────────────────────────────

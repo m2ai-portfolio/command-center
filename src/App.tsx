@@ -9,6 +9,7 @@ import { Triggers } from './pages/Triggers';
 import { AITown } from './pages/AITown';
 import { StMetro } from './pages/StMetro';
 import { SkyLynx } from './pages/SkyLynx';
+import { HiveMind } from './pages/HiveMind';
 import { Sidebar } from './components/Sidebar';
 
 export function App() {
@@ -27,6 +28,7 @@ export function App() {
           <Route path="/ai-town" element={<AITown />} />
           <Route path="/st-metro" element={<StMetro />} />
           <Route path="/sky-lynx" element={<SkyLynx />} />
+          <Route path="/hivemind" element={<HiveMind />} />
         </Routes>
       </main>
     </div>
