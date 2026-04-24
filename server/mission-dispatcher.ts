@@ -13,6 +13,7 @@ import { createWorktree, mergeWorktree, abortMerge, cleanupWorktree, isGitRepo }
 import { touchAgentLock, releaseAgentLock, reconcileStaleLocks } from './agent-lock.js';
 import { resolveConflict } from './conflict-resolver.js';
 import { triggerBus } from './trigger-bus.js';
+import { emitSkyLynxEvent } from './skylynx-event-bridge.js';
 
 /** Format prior conversation as a context block for the agent's next task. */
 function buildConversationContext(history: ConversationEntry[]): string | undefined {
@@ -78,10 +79,17 @@ export async function dispatchMissionTask(taskId: string): Promise<void> {
 
   const endpoint = getA2AEndpoint(task.agent_id);
   if (!endpoint) {
+    const errMsg = `No A2A endpoint registered for agent '${task.agent_id}'`;
     updateMissionTask(taskId, {
       status: 'failed',
-      error: `No A2A endpoint registered for agent '${task.agent_id}'`,
+      error: errMsg,
       completed_at: Math.floor(Date.now() / 1000),
+    });
+    void emitSkyLynxEvent('mission_fail', task.id, {
+      agent_id: task.agent_id,
+      error: errMsg,
+      phase: 'dispatch',
+      source: task.source ?? null,
     });
     return;
   }
@@ -95,10 +103,18 @@ export async function dispatchMissionTask(taskId: string): Promise<void> {
   let worktreePath: string | null = null;
   if (task.repo_path) {
     if (!isGitRepo(task.repo_path)) {
+      const errMsg = `repo_path is not a git repo: ${task.repo_path}`;
       updateMissionTask(taskId, {
         status: 'failed',
-        error: `repo_path is not a git repo: ${task.repo_path}`,
+        error: errMsg,
         completed_at: Math.floor(Date.now() / 1000),
+      });
+      void emitSkyLynxEvent('mission_fail', task.id, {
+        agent_id: task.agent_id,
+        error: errMsg,
+        phase: 'dispatch',
+        source: task.source ?? null,
+        repo_path: task.repo_path,
       });
       return;
     }
@@ -113,10 +129,18 @@ export async function dispatchMissionTask(taskId: string): Promise<void> {
       // lifetime of this dispatch. Released on every terminal transition.
       touchAgentLock(task.repo_path, task.id);
     } catch (err) {
+      const errMsg = `Worktree creation failed: ${err instanceof Error ? err.message : String(err)}`;
       updateMissionTask(taskId, {
         status: 'failed',
-        error: `Worktree creation failed: ${err instanceof Error ? err.message : String(err)}`,
+        error: errMsg,
         completed_at: Math.floor(Date.now() / 1000),
+      });
+      void emitSkyLynxEvent('mission_fail', task.id, {
+        agent_id: task.agent_id,
+        error: errMsg,
+        phase: 'dispatch',
+        source: task.source ?? null,
+        repo_path: task.repo_path ?? null,
       });
       return;
     }
@@ -152,13 +176,21 @@ export async function dispatchMissionTask(taskId: string): Promise<void> {
     });
     if (!res.ok) {
       const text = await res.text();
+      const errMsg = `A2A dispatch failed (${res.status}): ${text.slice(0, 500)}`;
       updateMissionTask(taskId, {
         status: 'failed',
-        error: `A2A dispatch failed (${res.status}): ${text.slice(0, 500)}`,
+        error: errMsg,
         completed_at: Math.floor(Date.now() / 1000),
       });
       // 028 Phase 2: dispatch failed after lock was taken; release it.
       if (task.repo_path) releaseAgentLock(task.repo_path, task.id);
+      void emitSkyLynxEvent('mission_fail', task.id, {
+        agent_id: task.agent_id,
+        error: errMsg,
+        phase: 'dispatch',
+        http_status: res.status,
+        source: task.source ?? null,
+      });
       return;
     }
     const data = await res.json() as { task_id: string };
@@ -167,15 +199,31 @@ export async function dispatchMissionTask(taskId: string): Promise<void> {
       claimed_at: Math.floor(Date.now() / 1000),
       a2a_task_id: data.task_id,
     });
+    // Sky-Lynx sibling sink: tee the lifecycle start. Fire-and-forget; the
+    // bridge already swallows disk errors and never throws.
+    void emitSkyLynxEvent('mission_start', task.id, {
+      agent_id: task.agent_id,
+      a2a_task_id: data.task_id,
+      skill: task.skill ?? null,
+      source: task.source ?? null,
+      repo_path: task.repo_path ?? null,
+    });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
+    const errMsg = `A2A dispatch exception: ${msg.slice(0, 500)}`;
     updateMissionTask(taskId, {
       status: 'failed',
-      error: `A2A dispatch exception: ${msg.slice(0, 500)}`,
+      error: errMsg,
       completed_at: Math.floor(Date.now() / 1000),
     });
     // 028 Phase 2: dispatch exception after lock was taken; release it.
     if (task.repo_path) releaseAgentLock(task.repo_path, task.id);
+    void emitSkyLynxEvent('mission_fail', task.id, {
+      agent_id: task.agent_id,
+      error: errMsg,
+      phase: 'dispatch',
+      source: task.source ?? null,
+    });
   }
 }
 
@@ -193,13 +241,20 @@ async function pollRunningTasks(): Promise<void> {
     try {
       const res = await fetch(`${endpoint}/task/${task.a2a_task_id}`);
       if (res.status === 404) {
+        const errMsg = 'A2A task lost (agent restarted or task expired)';
         updateMissionTask(task.id, {
           status: 'failed',
-          error: 'A2A task lost (agent restarted or task expired)',
+          error: errMsg,
           completed_at: Math.floor(Date.now() / 1000),
         });
         // 028 Phase 2: release WIP-suppression lock on terminal state.
         if (task.repo_path) releaseAgentLock(task.repo_path, task.id);
+        void emitSkyLynxEvent('mission_fail', task.id, {
+          agent_id: task.agent_id,
+          error: errMsg,
+          phase: 'poll',
+          source: task.source ?? null,
+        });
         continue;
       }
       if (!res.ok) continue;
@@ -250,17 +305,20 @@ async function pollRunningTasks(): Promise<void> {
           }
         }
 
+        const completedAtSec = Math.floor(Date.now() / 1000);
         updateMissionTask(task.id, {
           status: finalStatus,
           result: finalStatus === 'completed' ? result : result,
           error: finalError,
-          completed_at: Math.floor(Date.now() / 1000),
+          completed_at: completedAtSec,
         });
         // 028 Phase 2: release WIP-suppression lock on terminal state.
         if (task.repo_path) releaseAgentLock(task.repo_path, task.id);
         // R2.3: persist the exchange so future tasks for this agent have context
         appendConversation(task.agent_id, 'user', task.prompt, task.id);
         appendConversation(task.agent_id, 'assistant', result, task.id);
+        const durationMs =
+          task.claimed_at != null ? (completedAtSec - task.claimed_at) * 1000 : null;
         // 026: emit trigger event on failed terminal state (merge conflict / merge error)
         if (finalStatus === 'failed') {
           triggerBus.emitEvent({
@@ -270,6 +328,19 @@ async function pollRunningTasks(): Promise<void> {
             error: finalError,
             source: task.source ?? null,
           });
+          void emitSkyLynxEvent('mission_fail', task.id, {
+            agent_id: task.agent_id,
+            error: finalError,
+            phase: 'merge',
+            source: task.source ?? null,
+            duration_ms: durationMs,
+          });
+        } else {
+          void emitSkyLynxEvent('mission_complete', task.id, {
+            agent_id: task.agent_id,
+            source: task.source ?? null,
+            duration_ms: durationMs,
+          });
         }
       } else if (status.state === 'failed') {
         // 027: agent failed — discard the worktree (nothing to merge).
@@ -277,10 +348,11 @@ async function pollRunningTasks(): Promise<void> {
           cleanupWorktree(task.repo_path, task.worktree_path, task.branch_name);
         }
         const errMsg = status.error ?? 'A2A task failed without error message';
+        const completedAtSec = Math.floor(Date.now() / 1000);
         updateMissionTask(task.id, {
           status: 'failed',
           error: errMsg,
-          completed_at: Math.floor(Date.now() / 1000),
+          completed_at: completedAtSec,
         });
         // 028 Phase 2: release WIP-suppression lock on terminal state.
         if (task.repo_path) releaseAgentLock(task.repo_path, task.id);
@@ -291,6 +363,15 @@ async function pollRunningTasks(): Promise<void> {
           agent_id: task.agent_id,
           error: errMsg,
           source: task.source ?? null,
+        });
+        const durationMs =
+          task.claimed_at != null ? (completedAtSec - task.claimed_at) * 1000 : null;
+        void emitSkyLynxEvent('mission_fail', task.id, {
+          agent_id: task.agent_id,
+          error: errMsg,
+          phase: 'agent',
+          source: task.source ?? null,
+          duration_ms: durationMs,
         });
       }
       // else still running — leave for next poll
